@@ -6,6 +6,7 @@ import android.media.AudioTrack
 import kotlin.math.PI
 import kotlin.math.exp
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 
 /**
@@ -25,7 +26,7 @@ class SoundEngine {
     @Volatile var brightness = 0f    // 0..1, how buzzy the hum is (set from the ring's shape)
 
     // ---- One-shot volumes ----
-    var crashVolume = 0.17           // 1.0 was the original level
+    var crashVolume = 0.22           // peak loudness of the crash (the hum plays at about 0.35)
 
     @Volatile private var clickPending = false
     @Volatile private var crashPending = false
@@ -88,15 +89,15 @@ class SoundEngine {
         var tremPhase = 0.0
 
         val clickLen = (sampleRate * 0.035).toInt()
-        val crashLen = (sampleRate * 1.0).toInt()
+        val crashLen = (sampleRate * 0.7).toInt()
         var clickPos = -1
         var crashPos = -1
-        var crashLp = 0.0
-        var thumpPhase = 0.0
+        var popLp = 0.0
+        var glidePhase = 0.0
 
         while (running) {
             if (clickPending) { clickPending = false; clickPos = 0 }
-            if (crashPending) { crashPending = false; crashPos = 0; crashLp = 0.0; thumpPhase = 0.0 }
+            if (crashPending) { crashPending = false; crashPos = 0; popLp = 0.0; glidePhase = 0.0 }
 
             val targetF = humFreq.toDouble()
             val targetV = humVolume.toDouble()
@@ -136,13 +137,15 @@ class SoundEngine {
                 // ---- Crash ----
                 if (crashPos in 0 until crashLen) {
                     val t = crashPos.toDouble() / sampleRate
-                    // Noise that darkens as it fades, plus a low thump that drops in pitch.
-                    val cutoff = 0.6 * exp(-t * 3.0) + 0.03
-                    crashLp += cutoff * ((rnd.nextDouble() * 2 - 1) - crashLp)
-                    val thumpF = 90.0 * exp(-t * 3.0) + 30.0
-                    thumpPhase += twoPi * thumpF / sampleRate
-                    val env = exp(-t * 4.0)
-                    s += crashVolume * env * (1.3 * crashLp + 0.8 * sin(thumpPhase) + 0.4 * sin(2 * thumpPhase))
+                    // A soft "pop" followed by a falling "bwoww", like a bubble bursting
+                    // and deflating. No harsh noise, so it never gets loud.
+                    popLp += 0.25 * ((rnd.nextDouble() * 2 - 1) - popLp)
+                    val pop = popLp * exp(-t * 220.0)
+                    val glideF = 520.0 * exp(-t * 4.0) + 90.0
+                    glidePhase += twoPi * glideF / sampleRate
+                    val attack = min(1.0, t / 0.006)
+                    val glide = attack * exp(-t * 5.5) * (sin(glidePhase) + 0.3 * sin(2 * glidePhase)) / 1.3
+                    s += crashVolume * (0.8 * pop + glide)
                     crashPos++
                 } else crashPos = -1
 

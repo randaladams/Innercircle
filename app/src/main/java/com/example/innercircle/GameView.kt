@@ -31,18 +31,18 @@ class GameView(context: Context) : View(context) {
     private val innerStartRadiusDp = 22f      // starting size of the filled circle
     private val outerStartFraction = 0.42f    // ring size as a fraction of the screen's short side
     private val growthPerDistance = 0.04f     // inner radius gained per unit of distance dragged
-    private val baseShrinkDpPerSec = 6f       // ring shrink speed while touching, level 1
-    private val shrinkIncreasePerLevel = 0.4f // extra shrink speed for each level
-    private val maxShrinkDpPerSec = 16f       // shrink speed cap (while touching)
+    private val baseShrinkDpPerSec = 8f       // ring shrink speed while touching, level 1
+    private val shrinkIncreasePerLevel = 0.6f // extra shrink speed for each level
+    private val maxShrinkDpPerSec = 20f       // shrink speed cap (while touching)
     private val releasedSpeedMultiplier = 3f  // ring shrinks this many times faster while no finger is down
 
     // Wandering: the ring's center drifts toward random points, so it never closes in the same place.
-    private val wanderStartDp = 12f           // how far from screen center it can roam at level 1
-    private val wanderPerLevelDp = 5f         // extra roaming room per level
-    private val maxWanderDp = 70f
-    private val wanderSpeedStartDp = 8f       // roaming speed at level 1 (dp per second)
-    private val wanderSpeedPerLevelDp = 2f
-    private val maxWanderSpeedDp = 30f
+    private val wanderStartDp = 20f           // how far from screen center it can roam at level 1
+    private val wanderPerLevelDp = 6f         // extra roaming room per level
+    private val maxWanderDp = 80f
+    private val wanderSpeedStartDp = 14f      // roaming speed at level 1 (dp per second)
+    private val wanderSpeedPerLevelDp = 3f
+    private val maxWanderSpeedDp = 45f
 
     // Shapes unlock by level; each round picks one at random from those unlocked.
     private val ovalAtLevel = 3
@@ -66,8 +66,8 @@ class GameView(context: Context) : View(context) {
     // Par: the score needed to clear a level, as a share of a PERFECT run on that exact round.
     // A perfect run = move straight to the safe spot, then hands off until the ring closes.
     // It already accounts for the shape, the spawn distance and the ring speed.
-    private val parPercentStart = 0.55f       // share of perfect needed when the ring barely moves
-    private val parPercentMin = 0.40f         // share needed when the ring roams and spins the most
+    private val parPercentStart = 0.70f       // share of perfect needed when the ring barely moves
+    private val parPercentMin = 0.55f         // share needed when the ring roams and spins the most
     private val mercyPerFail = 0.05f          // par drops 5% for each failed try on a level...
     private val mercyFloor = 0.70f            // ...but never below 70% of its normal value
 
@@ -205,6 +205,7 @@ class GameView(context: Context) : View(context) {
     private val outerPath = Path()
 
     // DEBUG: safe spot finder — remove before release
+    private val safeButtonEnabled = false   // set to true to bring the SAFE button back
     private var showSafe = false
     private var safeX = 0f
     private var safeY = 0f
@@ -714,7 +715,7 @@ class GameView(context: Context) : View(context) {
         }
 
         if (state != State.PLAYING) drawResetButton(canvas) // DEBUG
-        if (state == State.READY) drawSafeButton(canvas)     // DEBUG
+        if (safeButtonEnabled && state == State.READY) drawSafeButton(canvas)     // DEBUG
     }
 
     private fun drawReady(canvas: Canvas) {
@@ -845,7 +846,7 @@ class GameView(context: Context) : View(context) {
                     return true
                 }
                 // DEBUG: safe spot button toggles the overlay without starting the game
-                if (state == State.READY && safeRect.contains(e.x, e.y)) {
+                if (safeButtonEnabled && state == State.READY && safeRect.contains(e.x, e.y)) {
                     showSafe = !showSafe
                     if (showSafe) findSafeSpot()
                     invalidate()
