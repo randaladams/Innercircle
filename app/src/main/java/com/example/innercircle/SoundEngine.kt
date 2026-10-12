@@ -22,9 +22,10 @@ class SoundEngine {
     @Volatile var humVolume = 0f     // 0..1
     @Volatile var wobble = 0f        // 0..1, how wobbly the ring is (adds vibrato)
     @Volatile var danger = 0f        // 0..1, how close the circles are (adds a pulsing tremolo)
+    @Volatile var brightness = 0f    // 0..1, how buzzy the hum is (set from the ring's shape)
 
     // ---- One-shot volumes ----
-    var crashVolume = 0.5            // 1.0 was the original level
+    var crashVolume = 0.17           // 1.0 was the original level
 
     @Volatile private var clickPending = false
     @Volatile private var crashPending = false
@@ -101,6 +102,7 @@ class SoundEngine {
             val targetV = humVolume.toDouble()
             val wb = wobble.toDouble()
             val dg = danger.toDouble()
+            val br = brightness.toDouble()
 
             for (i in buf.indices) {
                 // Smoothly glide toward the targets so changes never click.
@@ -114,9 +116,10 @@ class SoundEngine {
                 val f = freq * (1.0 + 0.035 * wb * sin(vibPhase))
                 phase += twoPi * f / sampleRate
                 if (phase > twoPi) phase -= twoPi
-                var hum = sin(phase) + 0.5 * sin(2 * phase) + 0.33 * sin(3 * phase) +
-                    0.2 * sin(4 * phase) + 0.12 * sin(5 * phase)
-                hum /= 2.15
+                // Sharper shapes get stronger upper harmonics, so they sound buzzier.
+                var hum = sin(phase) + 0.5 * sin(2 * phase) + (0.33 + 0.4 * br) * sin(3 * phase) +
+                    (0.2 + 0.4 * br) * sin(4 * phase) + (0.12 + 0.4 * br) * sin(5 * phase)
+                hum /= (2.15 + 1.2 * br)
                 tremPhase += twoPi * (3.0 + 12.0 * dg) / sampleRate
                 if (tremPhase > twoPi) tremPhase -= twoPi
                 val trem = 1.0 - 0.5 * dg * (0.5 + 0.5 * sin(tremPhase))

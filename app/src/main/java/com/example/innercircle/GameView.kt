@@ -14,6 +14,7 @@ import android.view.View
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -26,25 +27,40 @@ class GameView(context: Context) : View(context) {
     // ================= TUNING =================
     // All sizes are in dp so the game feels the same on every phone.
     private val innerStartRadiusDp = 22f      // starting size of the filled circle
-    private val outerStartFraction = 0.42f    // outer radius as a fraction of the screen's short side
+    private val outerStartFraction = 0.42f    // ring size as a fraction of the screen's short side
     private val growthPerDistance = 0.04f     // inner radius gained per unit of distance dragged
     private val baseShrinkDpPerSec = 6f       // ring shrink speed while touching, level 1
     private val shrinkIncreasePerLevel = 0.4f // extra shrink speed for each level
     private val maxShrinkDpPerSec = 16f       // shrink speed cap (while touching)
     private val releasedSpeedMultiplier = 3f  // ring shrinks this many times faster while no finger is down
-    private val driftStartsAtLevel = 6        // ring starts moving around at this level
-    private val maxDriftDp = 40f
-    private val wobbleStartsAtLevel = 11      // ring starts wobbling at this level
-    private val maxWobbleDp = 10f
 
-    // Scoring: points are earned for every dp the ring closes in while you survive,
-    // so a faster ring doesn't lower your ceiling.
+    // Wandering: the ring's center drifts toward random points, so it never closes in the same place.
+    private val wanderStartDp = 12f           // how far from screen center it can roam at level 1
+    private val wanderPerLevelDp = 5f         // extra roaming room per level
+    private val maxWanderDp = 70f
+    private val wanderSpeedStartDp = 8f       // roaming speed at level 1 (dp per second)
+    private val wanderSpeedPerLevelDp = 2f
+    private val maxWanderSpeedDp = 30f
+
+    // Shapes unlock by level; each round picks one at random from those unlocked.
+    private val ovalAtLevel = 3
+    private val spinAtLevel = 4               // shapes start rotating
+    private val squareAtLevel = 5
+    private val triangleAtLevel = 7
+    private val starAtLevel = 9
+    private val wobbleStartsAtLevel = 11      // ring edge starts wobbling
+    private val maxWobbleDp = 10f
+    private val spinStart = 0.15f             // rotation speed in radians per second when spinning starts
+    private val spinPerLevel = 0.03f
+    private val maxSpin = 0.6f
+
+    // Scoring: points are earned for every dp the ring closes in while you survive.
     private val pointsPerDp = 10f             // base points per dp the ring travels
     private val enduranceBonusMax = 2f        // the last stretch is worth up to (1 + this)x
-    private val levelBonusPerLevel = 0.08f    // each level is worth 8% more than the one before
-    private val parBase = 1500f               // score needed to clear level 1; scales with the level bonus
     private val penaltyPerDpMoved = 2f        // points lost per dp the inner circle travels
     private val handsOffPointsMultiplier = 2f // points are worth this much more while no finger is down
+    private val levelBonusPerLevel = 0.08f    // each level is worth 8% more than the one before
+    private val parBase = 1500f               // score needed to clear level 1; scales with the level bonus
 
     // Sound
     private val humLowHz = 70f                // hum pitch when the ring is full size
@@ -52,6 +68,18 @@ class GameView(context: Context) : View(context) {
     private val humHandsOffBoost = 1.2f       // hum rises this much while the ring is speeding
     private val humVolume = 0.35f
     // ==========================================
+
+    // Each shape's score multiplier makes up for how much less room it leaves you.
+    // "hum" sets how buzzy the hum sounds: smooth for a circle, harsh for a star.
+    private enum class Shape(val label: String, val scoreMult: Float, val hum: Float) {
+        CIRCLE("Circle", 1.00f, 0.0f),
+        OVAL("Oval", 1.15f, 0.2f),
+        SQUARE("Square", 1.10f, 0.5f),
+        TRIANGLE("Triangle", 1.35f, 0.8f),
+        STAR("Star", 1.40f, 1.0f)
+    }
+    private val ovalA = 1.15f     // oval half-width (1.0 = circle size)
+    private val ovalB = 0.72f     // oval half-height
 
     // ================= COLORS =================
     private val bgCenter = Color.rgb(28, 36, 72)
@@ -72,8 +100,10 @@ class GameView(context: Context) : View(context) {
     private val sound = SoundEngine()
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
+    private val twoPi = (2.0 * PI).toFloat()
 
     private var state = State.READY
+
     // Progress. You stay on a level until you reach its par score, then move up.
     private var level = prefs.getInt("level", 1)
     private var playedLevel = level           // the level of the round on screen
@@ -87,7 +117,13 @@ class GameView(context: Context) : View(context) {
     private var newLevelBest = false
     private var cleared = false
 
-    // Outer circle
+    // Outer shape
+    private var shape = Shape.CIRCLE
+    private var lastShape: Shape? = null
+    private var shapeAngle = 0f
+    private var shapeSpin = 0f
+    private var vx = FloatArray(0)            // polygon corner points for a unit-size shape
+    private var vy = FloatArray(0)
     private var baseCx = 0f
     private var baseCy = 0f
     private var outerCx = 0f
@@ -95,9 +131,18 @@ class GameView(context: Context) : View(context) {
     private var outerR = 0f
     private var startOuterR = 0f
     private var shrinkSpeed = 0f
-    private var driftAmp = 0f
     private var wobbleAmp = 0f
-    private var difficultyMult = 1f
+    private var levelMult = 1f
+    private var scoreMult = 1f
+
+    // Wandering
+    private var wanderAmp = 0f
+    private var wanderSpeed = 0f
+    private var targetX = 0f
+    private var targetY = 0f
+    private var velX = 0f
+    private var velY = 0f
+    private var retargetIn = 0f
 
     // Inner circle
     private var ix = 0f
@@ -119,8 +164,14 @@ class GameView(context: Context) : View(context) {
 
     // ---- Paints ----
     private val bgPaint = Paint()
-    private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private val ringGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val ringGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+    }
     private val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val innerGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val fingerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
@@ -183,6 +234,81 @@ class GameView(context: Context) : View(context) {
         newRound()
     }
 
+    // ---------------- Shapes ----------------
+
+    private fun pickShape(): Shape {
+        val pool = mutableListOf(Shape.CIRCLE)
+        if (level >= ovalAtLevel) pool.add(Shape.OVAL)
+        if (level >= squareAtLevel) pool.add(Shape.SQUARE)
+        if (level >= triangleAtLevel) pool.add(Shape.TRIANGLE)
+        if (level >= starAtLevel) pool.add(Shape.STAR)
+        val prev = lastShape
+        if (pool.size > 1 && prev != null) pool.remove(prev)   // no same shape twice in a row
+        return pool[Random.nextInt(pool.size)]
+    }
+
+    /** Builds the corner points for polygon shapes, at unit size. */
+    private fun buildVertices() {
+        val radii: FloatArray = when (shape) {
+            Shape.SQUARE -> FloatArray(4) { 1.15f }
+            Shape.TRIANGLE -> FloatArray(3) { 1.15f }
+            Shape.STAR -> FloatArray(10) { if (it % 2 == 0) 1.15f else 0.62f }
+            else -> FloatArray(0)
+        }
+        val n = radii.size
+        vx = FloatArray(n) { radii[it] * cos(twoPi * it / n) }
+        vy = FloatArray(n) { radii[it] * sin(twoPi * it / n) }
+    }
+
+    /** Distance from the shape's center to its edge in direction phi, at unit size. */
+    private fun unitRadius(phi: Float): Float = when (shape) {
+        Shape.CIRCLE -> 1f
+        Shape.OVAL -> {
+            val c = ovalB * cos(phi)
+            val s = ovalA * sin(phi)
+            ovalA * ovalB / sqrt(c * c + s * s)
+        }
+        else -> {
+            // Find which edge the ray hits, then intersect the ray with that edge.
+            val n = vx.size
+            val step = twoPi / n
+            var u = phi % twoPi
+            if (u < 0f) u += twoPi
+            val k = min(n - 1, floor(u / step).toInt())
+            val k2 = (k + 1) % n
+            val ex = vx[k2] - vx[k]
+            val ey = vy[k2] - vy[k]
+            val dx = cos(phi)
+            val dy = sin(phi)
+            (vx[k] * ey - vy[k] * ex) / (dx * ey - dy * ex)
+        }
+    }
+
+    /** Distance from the ring's center to its edge at screen angle theta, including spin and wobble. */
+    private fun boundaryAt(theta: Float): Float =
+        outerR * unitRadius(theta - shapeAngle) + wobbleAmp * sin(3f * theta + elapsed * 2.2f)
+
+    /** Smallest gap between the inner circle's edge and the ring. Below zero means they touch. */
+    private fun minClearance(): Float {
+        var m = Float.MAX_VALUE
+        val samples = 48
+        for (k in 0 until samples) {
+            val a = twoPi * k / samples
+            val dx = ix + ir * cos(a) - outerCx
+            val dy = iy + ir * sin(a) - outerCy
+            val c = boundaryAt(atan2(dy, dx)) - hypot(dx, dy)
+            if (c < m) m = c
+        }
+        return m
+    }
+
+    private fun collides() = outerR <= 0f || minClearance() <= 0f
+
+    /** 1 when there's plenty of room between the circles, 0 when they're touching. */
+    private fun gapFraction(): Float = (minClearance() / dp(70f)).coerceIn(0f, 1f)
+
+    // ---------------- Rounds ----------------
+
     private fun newRound() {
         baseCx = width / 2f
         baseCy = height / 2f
@@ -191,26 +317,54 @@ class GameView(context: Context) : View(context) {
         outerR = min(width, height) * outerStartFraction
         startOuterR = outerR
         ir = dp(innerStartRadiusDp)
+        elapsed = 0f
 
         // Difficulty and score multiplier both grow with the level.
         playedLevel = level
         val g = level - 1
         shrinkSpeed = dp(min(maxShrinkDpPerSec, baseShrinkDpPerSec + shrinkIncreasePerLevel * g))
-        driftAmp = if (level >= driftStartsAtLevel) dp(min(maxDriftDp, (level - driftStartsAtLevel + 1) * 4f)) else 0f
         wobbleAmp = if (level >= wobbleStartsAtLevel) dp(min(maxWobbleDp, (level - wobbleStartsAtLevel + 1) * 1f)) else 0f
-        difficultyMult = 1f + levelBonusPerLevel * g
-        par = (parBase * difficultyMult).toInt()
+        levelMult = 1f + levelBonusPerLevel * g
+        par = (parBase * levelMult).toInt()
         levelBest = prefs.getInt("lvl_$level", 0)
 
-        // Random spawn, never right in the middle.
-        val maxDist = outerR - ir - dp(12f)
-        val angle = Random.nextFloat() * 2f * PI.toFloat()
-        val dist = maxDist * (0.35f + 0.65f * sqrt(Random.nextFloat()))
-        ix = baseCx + cos(angle) * dist
-        iy = baseCy + sin(angle) * dist
+        // Random shape, random starting angle, random spin direction.
+        shape = pickShape()
+        lastShape = shape
+        buildVertices()
+        shapeAngle = Random.nextFloat() * twoPi
+        shapeSpin = if (level >= spinAtLevel && shape != Shape.CIRCLE) {
+            val s = min(maxSpin, spinStart + spinPerLevel * (level - spinAtLevel))
+            if (Random.nextBoolean()) s else -s
+        } else 0f
+        scoreMult = levelMult * shape.scoreMult
+
+        // Random wandering for the ring's center.
+        wanderAmp = dp(min(maxWanderDp, wanderStartDp + wanderPerLevelDp * g))
+        wanderSpeed = dp(min(maxWanderSpeedDp, wanderSpeedStartDp + wanderSpeedPerLevelDp * g))
+        velX = 0f
+        velY = 0f
+        pickTarget()
+
+        // Random spawn inside the shape, never right in the middle.
+        var placed = false
+        for (attempt in 0 until 30) {
+            val angle = Random.nextFloat() * twoPi
+            val edge = outerR * unitRadius(angle - shapeAngle) - ir - dp(12f)
+            val dist = edge * (0.35f + 0.65f * sqrt(Random.nextFloat()))
+            ix = baseCx + cos(angle) * dist
+            iy = baseCy + sin(angle) * dist
+            if (minClearance() > dp(6f)) {
+                placed = true
+                break
+            }
+        }
+        if (!placed) {
+            ix = baseCx
+            iy = baseCy
+        }
 
         movedDp = 0f
-        elapsed = 0f
         points = 0f
         newBest = false
         newLevelBest = false
@@ -221,7 +375,16 @@ class GameView(context: Context) : View(context) {
         sound.humFreq = humLowHz
         sound.danger = 0f
         sound.wobble = 0f
+        sound.brightness = shape.hum
         invalidate()
+    }
+
+    private fun pickTarget() {
+        val a = Random.nextFloat() * twoPi
+        val r = wanderAmp * sqrt(Random.nextFloat())
+        targetX = baseCx + cos(a) * r
+        targetY = baseCy + sin(a) * r
+        retargetIn = 1.5f + Random.nextFloat() * 2.5f   // change course every 1.5–4 seconds
     }
 
     private fun startGame() {
@@ -233,7 +396,7 @@ class GameView(context: Context) : View(context) {
     }
 
     private fun currentScore(): Int =
-        max(0, (points * difficultyMult - movedDp * penaltyPerDpMoved).toInt())
+        max(0, (points * scoreMult - movedDp * penaltyPerDpMoved).toInt())
 
     private fun gameOver() {
         state = State.OVER
@@ -276,6 +439,7 @@ class GameView(context: Context) : View(context) {
         bestLevel = 0
         total = 0
         lastScore = 0
+        lastShape = null
         newRound()
     }
 
@@ -286,15 +450,27 @@ class GameView(context: Context) : View(context) {
         val shrink = speed * dt
         // Endurance bonus: the further the ring has closed, the more each dp is worth.
         val progress = ((startOuterR - outerR) / startOuterR).coerceIn(0f, 1f)
-        // Hands off is riskier, so it pays more: every dp is worth double while the ring rushes in.
+        // Hands off is riskier, so it pays more.
         val handsOff = if (fingerDown) 1f else handsOffPointsMultiplier
         points += (shrink / density) * pointsPerDp * (1f + enduranceBonusMax * progress) * handsOff
         outerR -= shrink
 
-        if (driftAmp > 0f) {
-            outerCx = baseCx + driftAmp * sin(elapsed * 0.6f)
-            outerCy = baseCy + driftAmp * sin(elapsed * 0.43f)
-        }
+        // Spin
+        shapeAngle += shapeSpin * dt
+
+        // Wander: steer smoothly toward a random target, picking a new one now and then.
+        retargetIn -= dt
+        val tx = targetX - outerCx
+        val ty = targetY - outerCy
+        val td = hypot(tx, ty)
+        if (td < dp(4f) || retargetIn <= 0f) pickTarget()
+        val desX = if (td > 0f) tx / td * wanderSpeed else 0f
+        val desY = if (td > 0f) ty / td * wanderSpeed else 0f
+        val k = min(1f, dt * 1.5f)
+        velX += (desX - velX) * k
+        velY += (desY - velY) * k
+        outerCx += velX * dt
+        outerCy += velY * dt
 
         // Hum follows the ring: higher as it shrinks, wavering with its wobble,
         // pulsing faster as the gap closes, and rising while the ring is speeding.
@@ -306,29 +482,7 @@ class GameView(context: Context) : View(context) {
         if (collides()) gameOver()
     }
 
-    /** 1 when there's plenty of room between the circles, 0 when they're touching. */
-    private fun gapFraction(): Float {
-        val gap = outerR - wobbleAmp - (hypot(ix - outerCx, iy - outerCy) + ir)
-        return (gap / dp(70f)).coerceIn(0f, 1f)
-    }
-
-    private fun outerRadiusAt(theta: Float): Float =
-        outerR + wobbleAmp * sin(3f * theta + elapsed * 2.2f)
-
-    /** Checks points around the inner circle's edge against the (possibly wobbly) outer ring. */
-    private fun collides(): Boolean {
-        if (outerR <= ir) return true
-        val samples = 24
-        for (k in 0 until samples) {
-            val a = (2.0 * PI * k / samples).toFloat()
-            val px = ix + ir * cos(a)
-            val py = iy + ir * sin(a)
-            val dx = px - outerCx
-            val dy = py - outerCy
-            if (hypot(dx, dy) >= outerRadiusAt(atan2(dy, dx))) return true
-        }
-        return false
-    }
+    // ---------------- Drawing ----------------
 
     private fun lerpColor(a: Int, b: Int, t: Float): Int {
         val u = t.coerceIn(0f, 1f)
@@ -349,8 +503,21 @@ class GameView(context: Context) : View(context) {
         else lerpColor(dangerColor, warnColor, t * 2f)
     }
 
+    private fun buildOuterPath() {
+        outerPath.reset()
+        val steps = 240
+        for (i in 0..steps) {
+            val th = twoPi * i / steps
+            val r = max(0f, boundaryAt(th))
+            val x = outerCx + r * cos(th)
+            val y = outerCy + r * sin(th)
+            if (i == 0) outerPath.moveTo(x, y) else outerPath.lineTo(x, y)
+        }
+        outerPath.close()
+    }
+
     private fun drawRing(canvas: Canvas, paint: Paint) {
-        if (wobbleAmp == 0f) {
+        if (shape == Shape.CIRCLE && wobbleAmp == 0f) {
             canvas.drawCircle(outerCx, outerCy, max(0f, outerR), paint)
         } else {
             canvas.drawPath(outerPath, paint)
@@ -369,19 +536,8 @@ class GameView(context: Context) : View(context) {
 
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-        // Outer ring with a soft glow
-        if (wobbleAmp > 0f) {
-            outerPath.reset()
-            val steps = 120
-            for (i in 0..steps) {
-                val th = (2.0 * PI * i / steps).toFloat()
-                val r = max(0f, outerRadiusAt(th))
-                val x = outerCx + r * cos(th)
-                val y = outerCy + r * sin(th)
-                if (i == 0) outerPath.moveTo(x, y) else outerPath.lineTo(x, y)
-            }
-            outerPath.close()
-        }
+        // Outer shape with a soft glow
+        if (shape != Shape.CIRCLE || wobbleAmp > 0f) buildOuterPath()
         val rc = ringColor()
         ringGlow.color = withAlpha(rc, 55)
         ringPaint.color = rc
@@ -449,19 +605,25 @@ class GameView(context: Context) : View(context) {
         smallText.color = muted
         canvas.drawText("Touch anywhere and drag to move the circle", cx, y, smallText)
 
-        val mult = String.format("%.2f", difficultyMult)
+        val mult = String.format("%.2f", scoreMult)
         smallText.color = Color.WHITE
-        val bestText = if (levelBest > 0) "Your best $levelBest" else "Not played yet"
-        canvas.drawText("Level $playedLevel  ·  Score ×$mult  ·  $bestText", cx, y - dp(28f), smallText)
+        canvas.drawText("Level $playedLevel  ·  ${shape.label}  ·  Score ×$mult", cx, y - dp(28f), smallText)
+        smallText.color = muted
+        val bestText = if (levelBest > 0) "Your best on this level: $levelBest" else "Level not played yet"
+        canvas.drawText(bestText, cx, y - dp(52f), smallText)
 
         val note = when (playedLevel) {
-            driftStartsAtLevel -> "New: the ring drifts!"
+            ovalAtLevel -> "New shape: ovals!"
+            spinAtLevel -> "New: shapes now spin!"
+            squareAtLevel -> "New shape: squares!"
+            triangleAtLevel -> "New shape: triangles!"
+            starAtLevel -> "New shape: stars!"
             wobbleStartsAtLevel -> "New: the ring wobbles!"
             else -> null
         }
         if (note != null) {
             smallText.color = warnColor
-            canvas.drawText(note, cx, y - dp(56f), smallText)
+            canvas.drawText(note, cx, y - dp(80f), smallText)
         }
     }
 
@@ -511,6 +673,8 @@ class GameView(context: Context) : View(context) {
         val ty = resetRect.centerY() - (resetText.descent() + resetText.ascent()) / 2f
         canvas.drawText("RESET", resetRect.centerX(), ty, resetText)
     }
+
+    // ---------------- Touch ----------------
 
     /** Start following the given pointer from where it is now. */
     private fun track(e: MotionEvent, index: Int) {
