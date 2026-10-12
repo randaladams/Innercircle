@@ -3,6 +3,7 @@ package com.example.innercircle
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RadialGradient
@@ -12,6 +13,7 @@ import android.graphics.Typeface
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.floor
@@ -60,7 +62,14 @@ class GameView(context: Context) : View(context) {
     private val penaltyPerDpMoved = 2f        // points lost per dp the inner circle travels
     private val handsOffPointsMultiplier = 2f // points are worth this much more while no finger is down
     private val levelBonusPerLevel = 0.08f    // each level is worth 8% more than the one before
-    private val parBase = 1500f               // score needed to clear level 1; scales with the level bonus
+
+    // Par: the score needed to clear a level, as a share of a PERFECT run on that exact round.
+    // A perfect run = move straight to the safe spot, then hands off until the ring closes.
+    // It already accounts for the shape, the spawn distance and the ring speed.
+    private val parPercentStart = 0.55f       // share of perfect needed when the ring barely moves
+    private val parPercentMin = 0.40f         // share needed when the ring roams and spins the most
+    private val mercyPerFail = 0.05f          // par drops 5% for each failed try on a level...
+    private val mercyFloor = 0.70f            // ...but never below 70% of its normal value
 
     // Sound
     private val humLowHz = 70f                // hum pitch when the ring is full size
@@ -112,6 +121,10 @@ class GameView(context: Context) : View(context) {
     private var total = prefs.getInt("total", 0)          // sum of your best score on every level
     private var levelBest = 0                 // your best on the level being played
     private var par = 0
+    private var perfect = 0                   // best possible score for this round
+    private var parPercent = 0f               // share of perfect needed this round
+    private var mercy = 1f                    // par reduction from failed tries
+    private var fails = 0                     // failed tries on this level
     private var lastScore = 0
     private var newBest = false
     private var newLevelBest = false
@@ -191,6 +204,23 @@ class GameView(context: Context) : View(context) {
     }
     private val outerPath = Path()
 
+    // DEBUG: safe spot finder — remove before release
+    private var showSafe = false
+    private var safeX = 0f
+    private var safeY = 0f
+    private var safeR = 0f
+    private val safeRect = RectF()
+    private val safeFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(220, 30, 90, 160) }
+    private val safeFillOn = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(240, 40, 160, 90) }
+    private val safePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.WHITE
+    }
+    private val safeText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        color = Color.WHITE
+    }
+
     // DEBUG: reset button — remove before release
     private val resetRect = RectF()
     private val resetFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(220, 150, 30, 50) }
@@ -204,6 +234,9 @@ class GameView(context: Context) : View(context) {
         ringPaint.strokeWidth = dp(3f)
         ringGlow.strokeWidth = dp(14f)
         fingerPaint.strokeWidth = dp(2f)
+        safePaint.strokeWidth = dp(2f)
+        safePaint.pathEffect = DashPathEffect(floatArrayOf(dp(6f), dp(5f)), 0f)
+        safeText.textSize = dp(13f)
         bigText.textSize = dp(40f)
         midText.textSize = dp(24f)
         smallText.textSize = dp(16f)
@@ -231,6 +264,7 @@ class GameView(context: Context) : View(context) {
             bgCenter, bgEdge, Shader.TileMode.CLAMP
         )
         resetRect.set(w - dp(96f), dp(14f), w - dp(12f), dp(50f)) // DEBUG
+        safeRect.set(w - dp(96f), dp(58f), w - dp(12f), dp(94f))   // DEBUG
         newRound()
     }
 
@@ -325,8 +359,8 @@ class GameView(context: Context) : View(context) {
         shrinkSpeed = dp(min(maxShrinkDpPerSec, baseShrinkDpPerSec + shrinkIncreasePerLevel * g))
         wobbleAmp = if (level >= wobbleStartsAtLevel) dp(min(maxWobbleDp, (level - wobbleStartsAtLevel + 1) * 1f)) else 0f
         levelMult = 1f + levelBonusPerLevel * g
-        par = (parBase * levelMult).toInt()
         levelBest = prefs.getInt("lvl_$level", 0)
+        fails = prefs.getInt("fails_$level", 0)
 
         // Random shape, random starting angle, random spin direction.
         shape = pickShape()
@@ -364,6 +398,9 @@ class GameView(context: Context) : View(context) {
             iy = baseCy
         }
 
+        computePar()
+        if (showSafe) findSafeSpot() // DEBUG
+
         movedDp = 0f
         points = 0f
         newBest = false
@@ -377,6 +414,78 @@ class GameView(context: Context) : View(context) {
         sound.wobble = 0f
         sound.brightness = shape.hum
         invalidate()
+    }
+
+    /** Works out the best possible score for this round, then sets par as a share of it. */
+    private fun computePar() {
+        // How much room the shape leaves at its tightest point (1.0 = circle).
+        var inr = Float.MAX_VALUE
+        for (i in 0 until 720) {
+            val r = unitRadius(twoPi * i / 720)
+            if (r < inr) inr = r
+        }
+        // Perfect run: drag straight to the center, growing on the way...
+        val d = hypot(ix - baseCx, iy - baseCy)
+        val irFinal = ir + d * growthPerDistance
+        // ...then hands off until the shape is too small to hold the circle.
+        val rEnd = min(startOuterR, (irFinal + wobbleAmp) / inr)
+        val travel = startOuterR - rEnd
+        val pts = (pointsPerDp * handsOffPointsMultiplier / density) *
+            (travel + enduranceBonusMax * travel * travel / (2f * startOuterR))
+        perfect = max(0, (pts * scoreMult - d / density * penaltyPerDpMoved).toInt())
+
+        // A ring that roams and spins can't be played perfectly, so it asks for a smaller share.
+        val movement = (0.5f * wanderAmp / dp(maxWanderDp) + 0.5f * abs(shapeSpin) / maxSpin).coerceIn(0f, 1f)
+        parPercent = parPercentStart - (parPercentStart - parPercentMin) * movement
+        mercy = max(mercyFloor, 1f - mercyPerFail * fails)
+        par = max(1, (perfect * parPercent * mercy).toInt())
+    }
+
+    // DEBUG: brute-force search for the spot where the biggest circle fits inside the shape.
+    // It doesn't assume the answer; it tests points across the whole shape and zooms in on the best.
+    private fun findSafeSpot() {
+        val n = 720
+        val bx = FloatArray(n)
+        val by = FloatArray(n)
+        for (i in 0 until n) {
+            val th = twoPi * i / n
+            val r = boundaryAt(th)
+            bx[i] = outerCx + r * cos(th)
+            by[i] = outerCy + r * sin(th)
+        }
+        fun clearance(x: Float, y: Float): Float {
+            val dx = x - outerCx
+            val dy = y - outerCy
+            if (hypot(dx, dy) >= boundaryAt(atan2(dy, dx))) return -1f   // outside the shape
+            var m = Float.MAX_VALUE
+            for (i in 0 until n) {
+                val c = hypot(x - bx[i], y - by[i])
+                if (c < m) m = c
+            }
+            return m
+        }
+        var bx0 = outerCx
+        var by0 = outerCy
+        var bestC = -1f
+        var span = outerR * 1.2f
+        for (pass in 0 until 4) {
+            val cx0 = bx0
+            val cy0 = by0
+            for (gx in -10..10) for (gy in -10..10) {
+                val x = cx0 + span * gx / 10f
+                val y = cy0 + span * gy / 10f
+                val c = clearance(x, y)
+                if (c > bestC) {
+                    bestC = c
+                    bx0 = x
+                    by0 = y
+                }
+            }
+            span /= 4f
+        }
+        safeX = bx0
+        safeY = by0
+        safeR = bestC
     }
 
     private fun pickTarget() {
@@ -417,11 +526,16 @@ class GameView(context: Context) : View(context) {
             bestLevel = playedLevel
             newBest = true
         }
-        // Reach par to move up a level; otherwise you replay this one.
+        // Reach par to move up a level; otherwise you replay this one (and par eases a little).
         cleared = lastScore >= par
-        if (cleared) level = playedLevel + 1
-
-        prefs.edit()
+        val ed = prefs.edit()
+        if (cleared) {
+            level = playedLevel + 1
+            ed.remove("fails_$playedLevel")
+        } else {
+            ed.putInt("fails_$playedLevel", fails + 1)
+        }
+        ed
             .putInt("lvl_$playedLevel", levelBest)
             .putInt("total", total)
             .putInt("best", best)
@@ -555,6 +669,9 @@ class GameView(context: Context) : View(context) {
         )
         canvas.drawCircle(ix, iy, ir, innerPaint)
 
+        // DEBUG: safe spot overlay
+        if (showSafe) drawSafeSpot(canvas)
+
         // Small marker where the finger is, so you can see you're in control
         if (state == State.PLAYING && fingerDown) {
             fingerPaint.color = withAlpha(ic, 110)
@@ -597,6 +714,7 @@ class GameView(context: Context) : View(context) {
         }
 
         if (state != State.PLAYING) drawResetButton(canvas) // DEBUG
+        if (state == State.READY) drawSafeButton(canvas)     // DEBUG
     }
 
     private fun drawReady(canvas: Canvas) {
@@ -608,9 +726,13 @@ class GameView(context: Context) : View(context) {
         val mult = String.format("%.2f", scoreMult)
         smallText.color = Color.WHITE
         canvas.drawText("Level $playedLevel  ·  ${shape.label}  ·  Score ×$mult", cx, y - dp(28f), smallText)
+        smallText.color = innerSmall
+        val pct = (parPercent * 100).toInt()
+        val mercyText = if (mercy < 1f) "  (−${((1f - mercy) * 100).toInt()}% after $fails tries)" else ""
+        canvas.drawText("Par $par = $pct% of perfect$mercyText", cx, y - dp(52f), smallText)
         smallText.color = muted
         val bestText = if (levelBest > 0) "Your best on this level: $levelBest" else "Level not played yet"
-        canvas.drawText(bestText, cx, y - dp(52f), smallText)
+        canvas.drawText(bestText, cx, y - dp(76f), smallText)
 
         val note = when (playedLevel) {
             ovalAtLevel -> "New shape: ovals!"
@@ -623,7 +745,7 @@ class GameView(context: Context) : View(context) {
         }
         if (note != null) {
             smallText.color = warnColor
-            canvas.drawText(note, cx, y - dp(80f), smallText)
+            canvas.drawText(note, cx, y - dp(104f), smallText)
         }
     }
 
@@ -660,7 +782,8 @@ class GameView(context: Context) : View(context) {
             canvas.drawText("Level cleared! On to Level $level", cx, y, smallText)
         } else {
             smallText.color = warnColor
-            canvas.drawText("Score $par to clear Level $playedLevel", cx, y, smallText)
+            val pctOfPar = if (par > 0) lastScore * 100 / par else 0
+            canvas.drawText("$pctOfPar% of par  ·  Score $par to clear Level $playedLevel", cx, y, smallText)
         }
         y += dp(56f)
         smallText.color = Color.WHITE
@@ -672,6 +795,35 @@ class GameView(context: Context) : View(context) {
         canvas.drawRoundRect(resetRect, dp(8f), dp(8f), resetFill)
         val ty = resetRect.centerY() - (resetText.descent() + resetText.ascent()) / 2f
         canvas.drawText("RESET", resetRect.centerX(), ty, resetText)
+    }
+
+    // DEBUG: remove before release
+    private fun drawSafeButton(canvas: Canvas) {
+        canvas.drawRoundRect(safeRect, dp(8f), dp(8f), if (showSafe) safeFillOn else safeFill)
+        val ty = safeRect.centerY() - (resetText.descent() + resetText.ascent()) / 2f
+        canvas.drawText("SAFE", safeRect.centerX(), ty, resetText)
+    }
+
+    // DEBUG: remove before release
+    private fun drawSafeSpot(canvas: Canvas) {
+        val arm = dp(10f)
+        if (state == State.READY) {
+            // The searched result: the biggest circle that fits right now, and where it sits.
+            canvas.drawCircle(safeX, safeY, max(0f, safeR), safePaint)
+            canvas.drawLine(safeX - arm, safeY, safeX + arm, safeY, safePaint)
+            canvas.drawLine(safeX, safeY - arm, safeX, safeY + arm, safePaint)
+            val off = hypot(safeX - outerCx, safeY - outerCy) / density
+            val fit = safeR / density
+            canvas.drawText(
+                String.format("Safest spot: %.1f dp from center  ·  fits radius %.0f dp", off, fit),
+                width / 2f, height - dp(170f), safeText
+            )
+            canvas.drawText("Perfect score this round: $perfect", width / 2f, height - dp(150f), safeText)
+        } else if (state == State.PLAYING) {
+            // During play: follow the ring's center (where the search says the safe spot is).
+            canvas.drawLine(outerCx - arm, outerCy, outerCx + arm, outerCy, safePaint)
+            canvas.drawLine(outerCx, outerCy - arm, outerCx, outerCy + arm, safePaint)
+        }
     }
 
     // ---------------- Touch ----------------
@@ -690,6 +842,13 @@ class GameView(context: Context) : View(context) {
                 // DEBUG: reset button, only when not mid-game
                 if (state != State.PLAYING && resetRect.contains(e.x, e.y)) {
                     resetAll()
+                    return true
+                }
+                // DEBUG: safe spot button toggles the overlay without starting the game
+                if (state == State.READY && safeRect.contains(e.x, e.y)) {
+                    showSafe = !showSafe
+                    if (showSafe) findSafeSpot()
+                    invalidate()
                     return true
                 }
                 when (state) {
