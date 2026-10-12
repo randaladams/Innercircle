@@ -28,21 +28,21 @@ class GameView(context: Context) : View(context) {
     private val innerStartRadiusDp = 22f      // starting size of the filled circle
     private val outerStartFraction = 0.42f    // outer radius as a fraction of the screen's short side
     private val growthPerDistance = 0.04f     // inner radius gained per unit of distance dragged
-    private val baseShrinkDpPerSec = 6f       // ring shrink speed while touching, first game
-    private val shrinkIncreasePerGame = 0.4f  // extra shrink speed for each game played
+    private val baseShrinkDpPerSec = 6f       // ring shrink speed while touching, level 1
+    private val shrinkIncreasePerLevel = 0.4f // extra shrink speed for each level
     private val maxShrinkDpPerSec = 16f       // shrink speed cap (while touching)
     private val releasedSpeedMultiplier = 3f  // ring shrinks this many times faster while no finger is down
-    private val driftStartsAtGame = 5         // ring starts moving around after this many games
+    private val driftStartsAtLevel = 6        // ring starts moving around at this level
     private val maxDriftDp = 40f
-    private val wobbleStartsAtGame = 10       // ring starts wobbling after this many games
+    private val wobbleStartsAtLevel = 11      // ring starts wobbling at this level
     private val maxWobbleDp = 10f
 
     // Scoring: points are earned for every dp the ring closes in while you survive,
     // so a faster ring doesn't lower your ceiling.
     private val pointsPerDp = 10f             // base points per dp the ring travels
     private val enduranceBonusMax = 2f        // the last stretch is worth up to (1 + this)x
-    private val driftBonus = 0.25f            // +25% score once the ring drifts
-    private val wobbleBonus = 0.25f           // another +25% once it also wobbles
+    private val levelBonusPerLevel = 0.08f    // each level is worth 8% more than the one before
+    private val parBase = 1500f               // score needed to clear level 1; scales with the level bonus
     private val penaltyPerDpMoved = 2f        // points lost per dp the inner circle travels
     private val handsOffPointsMultiplier = 2f // points are worth this much more while no finger is down
 
@@ -74,10 +74,18 @@ class GameView(context: Context) : View(context) {
     private fun dp(v: Float) = v * density
 
     private var state = State.READY
-    private var gamesPlayed = prefs.getInt("games", 0)
-    private var best = prefs.getInt("best", 0)
+    // Progress. You stay on a level until you reach its par score, then move up.
+    private var level = prefs.getInt("level", 1)
+    private var playedLevel = level           // the level of the round on screen
+    private var best = prefs.getInt("best", 0)            // best single run, any level
+    private var bestLevel = prefs.getInt("bestLevel", 0)  // ...and the level it was set on
+    private var total = prefs.getInt("total", 0)          // sum of your best score on every level
+    private var levelBest = 0                 // your best on the level being played
+    private var par = 0
     private var lastScore = 0
     private var newBest = false
+    private var newLevelBest = false
+    private var cleared = false
 
     // Outer circle
     private var baseCx = 0f
@@ -126,6 +134,10 @@ class GameView(context: Context) : View(context) {
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
     }
     private val smallText = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    private val cornerText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.LEFT
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
     private val outerPath = Path()
 
     // DEBUG: reset button — remove before release
@@ -144,6 +156,7 @@ class GameView(context: Context) : View(context) {
         bigText.textSize = dp(40f)
         midText.textSize = dp(24f)
         smallText.textSize = dp(16f)
+        cornerText.textSize = dp(14f)
         resetText.textSize = dp(13f)
     }
 
@@ -179,14 +192,15 @@ class GameView(context: Context) : View(context) {
         startOuterR = outerR
         ir = dp(innerStartRadiusDp)
 
-        // Difficulty grows with the number of games played.
-        val g = gamesPlayed
-        shrinkSpeed = dp(min(maxShrinkDpPerSec, baseShrinkDpPerSec + shrinkIncreasePerGame * g))
-        driftAmp = if (g >= driftStartsAtGame) dp(min(maxDriftDp, (g - driftStartsAtGame + 1) * 4f)) else 0f
-        wobbleAmp = if (g >= wobbleStartsAtGame) dp(min(maxWobbleDp, (g - wobbleStartsAtGame + 1) * 1f)) else 0f
-        difficultyMult = 1f +
-            (if (driftAmp > 0f) driftBonus else 0f) +
-            (if (wobbleAmp > 0f) wobbleBonus else 0f)
+        // Difficulty and score multiplier both grow with the level.
+        playedLevel = level
+        val g = level - 1
+        shrinkSpeed = dp(min(maxShrinkDpPerSec, baseShrinkDpPerSec + shrinkIncreasePerLevel * g))
+        driftAmp = if (level >= driftStartsAtLevel) dp(min(maxDriftDp, (level - driftStartsAtLevel + 1) * 4f)) else 0f
+        wobbleAmp = if (level >= wobbleStartsAtLevel) dp(min(maxWobbleDp, (level - wobbleStartsAtLevel + 1) * 1f)) else 0f
+        difficultyMult = 1f + levelBonusPerLevel * g
+        par = (parBase * difficultyMult).toInt()
+        levelBest = prefs.getInt("lvl_$level", 0)
 
         // Random spawn, never right in the middle.
         val maxDist = outerR - ir - dp(12f)
@@ -199,6 +213,8 @@ class GameView(context: Context) : View(context) {
         elapsed = 0f
         points = 0f
         newBest = false
+        newLevelBest = false
+        cleared = false
         fingerDown = false
         state = State.READY
         sound.humVolume = 0f
@@ -225,20 +241,40 @@ class GameView(context: Context) : View(context) {
         sound.humVolume = 0f
         sound.crash()
         lastScore = currentScore()
-        gamesPlayed++
+
+        // Per-level best; the total is the sum of all of them.
+        if (lastScore > levelBest) {
+            total += lastScore - levelBest
+            levelBest = lastScore
+            newLevelBest = true
+        }
+        // Best single run anywhere, with the level it happened on.
         if (lastScore > best) {
             best = lastScore
+            bestLevel = playedLevel
             newBest = true
         }
-        prefs.edit().putInt("games", gamesPlayed).putInt("best", best).apply()
+        // Reach par to move up a level; otherwise you replay this one.
+        cleared = lastScore >= par
+        if (cleared) level = playedLevel + 1
+
+        prefs.edit()
+            .putInt("lvl_$playedLevel", levelBest)
+            .putInt("total", total)
+            .putInt("best", best)
+            .putInt("bestLevel", bestLevel)
+            .putInt("level", level)
+            .apply()
         overAtMs = System.currentTimeMillis()
     }
 
     // DEBUG: wipes saved games and best score — remove before release
     private fun resetAll() {
         prefs.edit().clear().apply()
-        gamesPlayed = 0
+        level = 1
         best = 0
+        bestLevel = 0
+        total = 0
         lastScore = 0
         newRound()
     }
@@ -370,16 +406,26 @@ class GameView(context: Context) : View(context) {
         }
 
         // HUD
-        val level = if (state == State.OVER) gamesPlayed else gamesPlayed + 1
         val cx = width / 2f
         val top = dp(80f)
         bigText.color = Color.WHITE
         canvas.drawText(String.format("%.2f", elapsed), cx, top, bigText)
-        midText.color = if (state == State.PLAYING && !fingerDown) gold else accent
-        canvas.drawText("${currentScore()}", cx, top + dp(34f), midText)
+        val score = currentScore()
+        midText.color = when {
+            state == State.PLAYING && !fingerDown -> gold
+            score >= par -> innerSmall        // turns mint once you've reached par
+            else -> accent
+        }
+        canvas.drawText("$score", cx, top + dp(34f), midText)
         smallText.color = muted
-        val mult = if (difficultyMult > 1f) "   ·   ×" + String.format("%.2f", difficultyMult) else ""
-        canvas.drawText("Level $level   ·   Moved ${movedDp.toInt()}$mult", cx, top + dp(60f), smallText)
+        canvas.drawText("Level $playedLevel  ·  Par $par  ·  Moved ${movedDp.toInt()}", cx, top + dp(60f), smallText)
+
+        // High score with its level, and the running total, in the top-left corner
+        cornerText.color = gold
+        val bestLine = if (best > 0) "High score $best  ·  Level $bestLevel" else "High score —"
+        canvas.drawText(bestLine, dp(16f), dp(30f), cornerText)
+        cornerText.color = muted
+        canvas.drawText("Total $total", dp(16f), dp(50f), cornerText)
 
         when (state) {
             State.READY -> drawReady(canvas)
@@ -402,14 +448,20 @@ class GameView(context: Context) : View(context) {
         val y = height - dp(60f)
         smallText.color = muted
         canvas.drawText("Touch anywhere and drag to move the circle", cx, y, smallText)
-        val note = when (gamesPlayed) {
-            driftStartsAtGame -> "New: the ring drifts!  Score ×${String.format("%.2f", difficultyMult)}"
-            wobbleStartsAtGame -> "New: the ring wobbles!  Score ×${String.format("%.2f", difficultyMult)}"
+
+        val mult = String.format("%.2f", difficultyMult)
+        smallText.color = Color.WHITE
+        val bestText = if (levelBest > 0) "Your best $levelBest" else "Not played yet"
+        canvas.drawText("Level $playedLevel  ·  Score ×$mult  ·  $bestText", cx, y - dp(28f), smallText)
+
+        val note = when (playedLevel) {
+            driftStartsAtLevel -> "New: the ring drifts!"
+            wobbleStartsAtLevel -> "New: the ring wobbles!"
             else -> null
         }
         if (note != null) {
             smallText.color = warnColor
-            canvas.drawText(note, cx, y - dp(28f), smallText)
+            canvas.drawText(note, cx, y - dp(56f), smallText)
         }
     }
 
@@ -426,14 +478,29 @@ class GameView(context: Context) : View(context) {
         bigText.color = if (newBest) gold else accent
         canvas.drawText("$lastScore", cx, y, bigText)
         y += dp(30f)
-        if (newBest) {
-            midText.color = gold
-            canvas.drawText("NEW BEST!", cx, y, midText)
-        } else {
-            smallText.color = muted
-            canvas.drawText("Best $best", cx, y, smallText)
+        when {
+            newBest -> {
+                midText.color = gold
+                canvas.drawText("NEW HIGH SCORE!", cx, y, midText)
+            }
+            newLevelBest -> {
+                midText.color = gold
+                canvas.drawText("Level $playedLevel best!", cx, y, midText)
+            }
+            else -> {
+                smallText.color = muted
+                canvas.drawText("Level $playedLevel best $levelBest", cx, y, smallText)
+            }
         }
-        y += dp(70f)
+        y += dp(34f)
+        if (cleared) {
+            smallText.color = innerSmall
+            canvas.drawText("Level cleared! On to Level $level", cx, y, smallText)
+        } else {
+            smallText.color = warnColor
+            canvas.drawText("Score $par to clear Level $playedLevel", cx, y, smallText)
+        }
+        y += dp(56f)
         smallText.color = Color.WHITE
         canvas.drawText("Tap to play again", cx, y, smallText)
     }

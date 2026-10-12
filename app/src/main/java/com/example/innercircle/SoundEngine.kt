@@ -23,6 +23,9 @@ class SoundEngine {
     @Volatile var wobble = 0f        // 0..1, how wobbly the ring is (adds vibrato)
     @Volatile var danger = 0f        // 0..1, how close the circles are (adds a pulsing tremolo)
 
+    // ---- One-shot volumes ----
+    var crashVolume = 0.5            // 1.0 was the original level
+
     @Volatile private var clickPending = false
     @Volatile private var crashPending = false
     @Volatile private var running = false
@@ -136,7 +139,7 @@ class SoundEngine {
                     val thumpF = 90.0 * exp(-t * 3.0) + 30.0
                     thumpPhase += twoPi * thumpF / sampleRate
                     val env = exp(-t * 4.0)
-                    s += env * (1.3 * crashLp + 0.8 * sin(thumpPhase) + 0.4 * sin(2 * thumpPhase))
+                    s += crashVolume * env * (1.3 * crashLp + 0.8 * sin(thumpPhase) + 0.4 * sin(2 * thumpPhase))
                     crashPos++
                 } else crashPos = -1
 
