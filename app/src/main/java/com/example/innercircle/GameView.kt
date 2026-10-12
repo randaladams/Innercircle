@@ -28,9 +28,10 @@ class GameView(context: Context) : View(context) {
     private val innerStartRadiusDp = 22f      // starting size of the filled circle
     private val outerStartFraction = 0.42f    // outer radius as a fraction of the screen's short side
     private val growthPerDistance = 0.04f     // inner radius gained per unit of distance dragged
-    private val baseShrinkDpPerSec = 6f       // outer circle shrink speed in the first game
+    private val baseShrinkDpPerSec = 6f       // ring shrink speed while touching, first game
     private val shrinkIncreasePerGame = 0.4f  // extra shrink speed for each game played
-    private val maxShrinkDpPerSec = 16f       // shrink speed cap
+    private val maxShrinkDpPerSec = 16f       // shrink speed cap (while touching)
+    private val releasedSpeedMultiplier = 3f  // ring shrinks this many times faster while no finger is down
     private val driftStartsAtGame = 5         // ring starts moving around after this many games
     private val maxDriftDp = 40f
     private val wobbleStartsAtGame = 10       // ring starts wobbling after this many games
@@ -42,7 +43,7 @@ class GameView(context: Context) : View(context) {
     private val enduranceBonusMax = 2f        // the last stretch is worth up to (1 + this)x
     private val driftBonus = 0.25f            // +25% score once the ring drifts
     private val wobbleBonus = 0.25f           // another +25% once it also wobbles
-    private val penaltyPerMove = 25           // minus 25 for every move after the first
+    private val penaltyPerDpMoved = 2f        // points lost per dp the inner circle travels
     // ==========================================
 
     // ================= COLORS =================
@@ -88,12 +89,13 @@ class GameView(context: Context) : View(context) {
     private var ir = 0f
 
     // Touch / scoring
-    private var dragging = false
-    private var grabDx = 0f
-    private var grabDy = 0f
-    private var grabDistance = 0f
-    private var grabCounted = false
-    private var moves = 0
+    // Control is relative: touch anywhere and the circle moves by however far your
+    // finger moves, so your finger never has to cover the circle.
+    private var fingerDown = false
+    private var activePointerId = -1
+    private var lastX = 0f
+    private var lastY = 0f
+    private var movedDp = 0f
     private var elapsed = 0f
     private var points = 0f
     private var lastFrameNs = 0L
@@ -105,6 +107,7 @@ class GameView(context: Context) : View(context) {
     private val ringGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val innerGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val fingerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val overlayPaint = Paint().apply { color = Color.argb(185, 6, 8, 18) }
     private val bigText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
@@ -129,6 +132,7 @@ class GameView(context: Context) : View(context) {
     init {
         ringPaint.strokeWidth = dp(3f)
         ringGlow.strokeWidth = dp(14f)
+        fingerPaint.strokeWidth = dp(2f)
         bigText.textSize = dp(40f)
         midText.textSize = dp(24f)
         smallText.textSize = dp(16f)
@@ -170,11 +174,11 @@ class GameView(context: Context) : View(context) {
         ix = baseCx + cos(angle) * dist
         iy = baseCy + sin(angle) * dist
 
-        moves = 0
+        movedDp = 0f
         elapsed = 0f
         points = 0f
         newBest = false
-        dragging = false
+        fingerDown = false
         state = State.READY
         invalidate()
     }
@@ -186,11 +190,11 @@ class GameView(context: Context) : View(context) {
     }
 
     private fun currentScore(): Int =
-        max(0, (points * difficultyMult).toInt() - penaltyPerMove * max(0, moves - 1))
+        max(0, (points * difficultyMult - movedDp * penaltyPerDpMoved).toInt())
 
     private fun gameOver() {
         state = State.OVER
-        dragging = false
+        fingerDown = false
         lastScore = currentScore()
         gamesPlayed++
         if (lastScore > best) {
@@ -212,7 +216,9 @@ class GameView(context: Context) : View(context) {
 
     private fun update(dt: Float) {
         elapsed += dt
-        val shrink = shrinkSpeed * dt
+        // Ring closes slowly while you hold the screen, fast while you don't.
+        val speed = if (fingerDown) shrinkSpeed else shrinkSpeed * releasedSpeedMultiplier
+        val shrink = speed * dt
         // Endurance bonus: the further the ring has closed, the more each dp is worth.
         val progress = ((startOuterR - outerR) / startOuterR).coerceIn(0f, 1f)
         points += (shrink / density) * pointsPerDp * (1f + enduranceBonusMax * progress)
@@ -313,6 +319,12 @@ class GameView(context: Context) : View(context) {
         )
         canvas.drawCircle(ix, iy, ir, innerPaint)
 
+        // Small marker where the finger is, so you can see you're in control
+        if (state == State.PLAYING && fingerDown) {
+            fingerPaint.color = withAlpha(ic, 110)
+            canvas.drawCircle(lastX, lastY, dp(20f), fingerPaint)
+        }
+
         // HUD
         val level = if (state == State.OVER) gamesPlayed else gamesPlayed + 1
         val cx = width / 2f
@@ -323,12 +335,18 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("${currentScore()}", cx, top + dp(34f), midText)
         smallText.color = muted
         val mult = if (difficultyMult > 1f) "   ·   ×" + String.format("%.2f", difficultyMult) else ""
-        canvas.drawText("Level $level   ·   Moves $moves$mult", cx, top + dp(60f), smallText)
+        canvas.drawText("Level $level   ·   Moved ${movedDp.toInt()}$mult", cx, top + dp(60f), smallText)
 
         when (state) {
             State.READY -> drawReady(canvas)
             State.OVER -> drawGameOver(canvas)
-            State.PLAYING -> postInvalidateOnAnimation()
+            State.PLAYING -> {
+                if (!fingerDown) {
+                    smallText.color = warnColor
+                    canvas.drawText("Ring speeding up! Touch to slow it", cx, height - dp(60f), smallText)
+                }
+                postInvalidateOnAnimation()
+            }
         }
 
         if (state != State.PLAYING) drawResetButton(canvas) // DEBUG
@@ -338,7 +356,7 @@ class GameView(context: Context) : View(context) {
         val cx = width / 2f
         val y = height - dp(60f)
         smallText.color = muted
-        canvas.drawText("Touch the circle to start", cx, y, smallText)
+        canvas.drawText("Touch anywhere and drag to move the circle", cx, y, smallText)
         val note = when (gamesPlayed) {
             driftStartsAtGame -> "New: the ring drifts!  Score ×${String.format("%.2f", difficultyMult)}"
             wobbleStartsAtGame -> "New: the ring wobbles!  Score ×${String.format("%.2f", difficultyMult)}"
@@ -358,7 +376,7 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("Game over", cx, y, bigText)
         y += dp(46f)
         smallText.color = muted
-        canvas.drawText(String.format("Time %.2f s   ·   Moves %d", elapsed, moves), cx, y, smallText)
+        canvas.drawText(String.format("Time %.2f s   ·   Moved %d", elapsed, movedDp.toInt()), cx, y, smallText)
         y += dp(56f)
         bigText.color = if (newBest) gold else accent
         canvas.drawText("$lastScore", cx, y, bigText)
@@ -382,14 +400,12 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("RESET", resetRect.centerX(), ty, resetText)
     }
 
-    private fun touchesInner(x: Float, y: Float) = hypot(x - ix, y - iy) <= ir + dp(12f)
-
-    private fun grab(x: Float, y: Float) {
-        dragging = true
-        grabDx = ix - x
-        grabDy = iy - y
-        grabDistance = 0f
-        grabCounted = false
+    /** Start following the given pointer from where it is now. */
+    private fun track(e: MotionEvent, index: Int) {
+        activePointerId = e.getPointerId(index)
+        lastX = e.getX(index)
+        lastY = e.getY(index)
+        fingerDown = true
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -401,30 +417,39 @@ class GameView(context: Context) : View(context) {
                     return true
                 }
                 when (state) {
-                    State.READY -> if (touchesInner(e.x, e.y)) {
+                    State.READY -> {
                         startGame()
-                        grab(e.x, e.y)
+                        track(e, 0)
                     }
-                    State.PLAYING -> if (touchesInner(e.x, e.y)) grab(e.x, e.y)
+                    State.PLAYING -> track(e, 0)
                     State.OVER -> if (System.currentTimeMillis() - overAtMs > 700) newRound()
                 }
             }
-            MotionEvent.ACTION_MOVE -> if (dragging && state == State.PLAYING) {
-                val nx = e.x + grabDx
-                val ny = e.y + grabDy
-                val d = hypot(nx - ix, ny - iy)
-                ix = nx
-                iy = ny
-                ir += d * growthPerDistance
-                grabDistance += d
-                // A "move" is one touch-and-drag. Tiny finger jitter doesn't count.
-                if (!grabCounted && grabDistance > dp(3f)) {
-                    moves++
-                    grabCounted = true
+            MotionEvent.ACTION_MOVE -> if (fingerDown && state == State.PLAYING) {
+                val idx = e.findPointerIndex(activePointerId)
+                if (idx >= 0) {
+                    val x = e.getX(idx)
+                    val y = e.getY(idx)
+                    val dx = x - lastX
+                    val dy = y - lastY
+                    lastX = x
+                    lastY = y
+                    val d = hypot(dx, dy)
+                    ix += dx
+                    iy += dy
+                    ir += d * growthPerDistance
+                    movedDp += d / density
                 }
             }
-            // Lifting the finger does nothing except let go of the circle.
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> dragging = false
+            // If the finger we're following lifts while another is still down, switch to that one.
+            MotionEvent.ACTION_POINTER_UP -> {
+                val upIdx = e.actionIndex
+                if (e.getPointerId(upIdx) == activePointerId) {
+                    track(e, if (upIdx == 0) 1 else 0)
+                }
+            }
+            // Lifting your last finger lets the ring speed up.
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> fingerDown = false
         }
         return true
     }
