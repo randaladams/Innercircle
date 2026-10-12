@@ -44,6 +44,13 @@ class GameView(context: Context) : View(context) {
     private val driftBonus = 0.25f            // +25% score once the ring drifts
     private val wobbleBonus = 0.25f           // another +25% once it also wobbles
     private val penaltyPerDpMoved = 2f        // points lost per dp the inner circle travels
+    private val handsOffPointsMultiplier = 2f // points are worth this much more while no finger is down
+
+    // Sound
+    private val humLowHz = 70f                // hum pitch when the ring is full size
+    private val humHighHz = 150f              // hum pitch when the ring has fully closed
+    private val humHandsOffBoost = 1.2f       // hum rises this much while the ring is speeding
+    private val humVolume = 0.35f
     // ==========================================
 
     // ================= COLORS =================
@@ -62,6 +69,7 @@ class GameView(context: Context) : View(context) {
     private enum class State { READY, PLAYING, OVER }
 
     private val prefs = context.getSharedPreferences("inner_circle", Context.MODE_PRIVATE)
+    private val sound = SoundEngine()
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
 
@@ -139,6 +147,19 @@ class GameView(context: Context) : View(context) {
         resetText.textSize = dp(13f)
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        sound.start()
+    }
+
+    override fun onDetachedFromWindow() {
+        sound.stop()
+        super.onDetachedFromWindow()
+    }
+
+    fun resumeAudio() = sound.start()
+    fun pauseAudio() = sound.stop()
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         bgPaint.shader = RadialGradient(
@@ -180,12 +201,18 @@ class GameView(context: Context) : View(context) {
         newBest = false
         fingerDown = false
         state = State.READY
+        sound.humVolume = 0f
+        sound.humFreq = humLowHz
+        sound.danger = 0f
+        sound.wobble = 0f
         invalidate()
     }
 
     private fun startGame() {
         state = State.PLAYING
         lastFrameNs = 0L
+        sound.click()
+        sound.humVolume = humVolume
         invalidate()
     }
 
@@ -195,6 +222,8 @@ class GameView(context: Context) : View(context) {
     private fun gameOver() {
         state = State.OVER
         fingerDown = false
+        sound.humVolume = 0f
+        sound.crash()
         lastScore = currentScore()
         gamesPlayed++
         if (lastScore > best) {
@@ -221,14 +250,30 @@ class GameView(context: Context) : View(context) {
         val shrink = speed * dt
         // Endurance bonus: the further the ring has closed, the more each dp is worth.
         val progress = ((startOuterR - outerR) / startOuterR).coerceIn(0f, 1f)
-        points += (shrink / density) * pointsPerDp * (1f + enduranceBonusMax * progress)
+        // Hands off is riskier, so it pays more: every dp is worth double while the ring rushes in.
+        val handsOff = if (fingerDown) 1f else handsOffPointsMultiplier
+        points += (shrink / density) * pointsPerDp * (1f + enduranceBonusMax * progress) * handsOff
         outerR -= shrink
 
         if (driftAmp > 0f) {
             outerCx = baseCx + driftAmp * sin(elapsed * 0.6f)
             outerCy = baseCy + driftAmp * sin(elapsed * 0.43f)
         }
+
+        // Hum follows the ring: higher as it shrinks, wavering with its wobble,
+        // pulsing faster as the gap closes, and rising while the ring is speeding.
+        sound.humFreq = (humLowHz + (humHighHz - humLowHz) * progress) *
+            (if (fingerDown) 1f else humHandsOffBoost)
+        sound.wobble = if (wobbleAmp > 0f) (wobbleAmp / dp(maxWobbleDp)).coerceIn(0f, 1f) else 0f
+        sound.danger = 1f - gapFraction()
+
         if (collides()) gameOver()
+    }
+
+    /** 1 when there's plenty of room between the circles, 0 when they're touching. */
+    private fun gapFraction(): Float {
+        val gap = outerR - wobbleAmp - (hypot(ix - outerCx, iy - outerCy) + ir)
+        return (gap / dp(70f)).coerceIn(0f, 1f)
     }
 
     private fun outerRadiusAt(theta: Float): Float =
@@ -263,8 +308,7 @@ class GameView(context: Context) : View(context) {
     /** Ring color slides from cyan to yellow to red as the gap closes. */
     private fun ringColor(): Int {
         if (state == State.OVER) return dangerColor
-        val gap = outerR - wobbleAmp - (hypot(ix - outerCx, iy - outerCy) + ir)
-        val t = (gap / dp(70f)).coerceIn(0f, 1f)
+        val t = gapFraction()
         return if (t > 0.5f) lerpColor(warnColor, safeColor, (t - 0.5f) * 2f)
         else lerpColor(dangerColor, warnColor, t * 2f)
     }
@@ -331,7 +375,7 @@ class GameView(context: Context) : View(context) {
         val top = dp(80f)
         bigText.color = Color.WHITE
         canvas.drawText(String.format("%.2f", elapsed), cx, top, bigText)
-        midText.color = accent
+        midText.color = if (state == State.PLAYING && !fingerDown) gold else accent
         canvas.drawText("${currentScore()}", cx, top + dp(34f), midText)
         smallText.color = muted
         val mult = if (difficultyMult > 1f) "   ·   ×" + String.format("%.2f", difficultyMult) else ""
@@ -342,8 +386,9 @@ class GameView(context: Context) : View(context) {
             State.OVER -> drawGameOver(canvas)
             State.PLAYING -> {
                 if (!fingerDown) {
-                    smallText.color = warnColor
-                    canvas.drawText("Ring speeding up! Touch to slow it", cx, height - dp(60f), smallText)
+                    smallText.color = gold
+                    val pm = String.format("%.0f", handsOffPointsMultiplier)
+                    canvas.drawText("HANDS OFF: points ×$pm   ·   touch to slow", cx, height - dp(60f), smallText)
                 }
                 postInvalidateOnAnimation()
             }
