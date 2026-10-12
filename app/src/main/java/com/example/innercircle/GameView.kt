@@ -5,6 +5,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RadialGradient
+import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.view.MotionEvent
 import android.view.View
@@ -28,12 +31,31 @@ class GameView(context: Context) : View(context) {
     private val baseShrinkDpPerSec = 6f       // outer circle shrink speed in the first game
     private val shrinkIncreasePerGame = 0.4f  // extra shrink speed for each game played
     private val maxShrinkDpPerSec = 16f       // shrink speed cap
-    private val driftStartsAtGame = 5         // outer circle starts moving around after this many games
+    private val driftStartsAtGame = 5         // ring starts moving around after this many games
     private val maxDriftDp = 40f
-    private val wobbleStartsAtGame = 10       // outer circle starts wobbling after this many games
+    private val wobbleStartsAtGame = 10       // ring starts wobbling after this many games
     private val maxWobbleDp = 10f
-    private val pointsPerSecond = 100         // score: 100 points per second survived...
-    private val penaltyPerMove = 25           // ...minus 25 for every move after the first
+
+    // Scoring: points are earned for every dp the ring closes in while you survive,
+    // so a faster ring doesn't lower your ceiling.
+    private val pointsPerDp = 10f             // base points per dp the ring travels
+    private val enduranceBonusMax = 2f        // the last stretch is worth up to (1 + this)x
+    private val driftBonus = 0.25f            // +25% score once the ring drifts
+    private val wobbleBonus = 0.25f           // another +25% once it also wobbles
+    private val penaltyPerMove = 25           // minus 25 for every move after the first
+    // ==========================================
+
+    // ================= COLORS =================
+    private val bgCenter = Color.rgb(28, 36, 72)
+    private val bgEdge = Color.rgb(8, 10, 22)
+    private val safeColor = Color.rgb(80, 220, 255)     // ring when you have room
+    private val warnColor = Color.rgb(255, 200, 60)     // ring when it's getting close
+    private val dangerColor = Color.rgb(255, 70, 100)   // ring when you're about to touch
+    private val innerSmall = Color.rgb(110, 255, 170)   // inner circle at starting size
+    private val innerBig = Color.rgb(200, 110, 255)     // inner circle once it's grown a lot
+    private val accent = Color.rgb(80, 220, 255)
+    private val gold = Color.rgb(255, 210, 80)
+    private val muted = Color.rgb(160, 172, 200)
     // ==========================================
 
     private enum class State { READY, PLAYING, OVER }
@@ -46,6 +68,7 @@ class GameView(context: Context) : View(context) {
     private var gamesPlayed = prefs.getInt("games", 0)
     private var best = prefs.getInt("best", 0)
     private var lastScore = 0
+    private var newBest = false
 
     // Outer circle
     private var baseCx = 0f
@@ -53,9 +76,11 @@ class GameView(context: Context) : View(context) {
     private var outerCx = 0f
     private var outerCy = 0f
     private var outerR = 0f
+    private var startOuterR = 0f
     private var shrinkSpeed = 0f
     private var driftAmp = 0f
     private var wobbleAmp = 0f
+    private var difficultyMult = 1f
 
     // Inner circle
     private var ix = 0f
@@ -70,36 +95,53 @@ class GameView(context: Context) : View(context) {
     private var grabCounted = false
     private var moves = 0
     private var elapsed = 0f
+    private var points = 0f
     private var lastFrameNs = 0L
     private var overAtMs = 0L
 
-    private val outerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        color = Color.WHITE
-    }
-    private val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = Color.rgb(61, 220, 151)
-    }
+    // ---- Paints ----
+    private val bgPaint = Paint()
+    private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val ringGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val innerGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val overlayPaint = Paint().apply { color = Color.argb(185, 6, 8, 18) }
     private val bigText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    private val midText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    private val smallText = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    private val outerPath = Path()
+
+    // DEBUG: reset button — remove before release
+    private val resetRect = RectF()
+    private val resetFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(220, 150, 30, 50) }
+    private val resetText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
     }
-    private val smallText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(170, 180, 190)
-        textAlign = Paint.Align.CENTER
-    }
-    private val outerPath = Path()
 
     init {
-        outerPaint.strokeWidth = dp(3f)
+        ringPaint.strokeWidth = dp(3f)
+        ringGlow.strokeWidth = dp(14f)
         bigText.textSize = dp(40f)
-        smallText.textSize = dp(18f)
+        midText.textSize = dp(24f)
+        smallText.textSize = dp(16f)
+        resetText.textSize = dp(13f)
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        bgPaint.shader = RadialGradient(
+            w / 2f, h / 2f, max(w, h) * 0.75f,
+            bgCenter, bgEdge, Shader.TileMode.CLAMP
+        )
+        resetRect.set(w - dp(96f), dp(14f), w - dp(12f), dp(50f)) // DEBUG
         newRound()
     }
 
@@ -109,6 +151,7 @@ class GameView(context: Context) : View(context) {
         outerCx = baseCx
         outerCy = baseCy
         outerR = min(width, height) * outerStartFraction
+        startOuterR = outerR
         ir = dp(innerStartRadiusDp)
 
         // Difficulty grows with the number of games played.
@@ -116,6 +159,9 @@ class GameView(context: Context) : View(context) {
         shrinkSpeed = dp(min(maxShrinkDpPerSec, baseShrinkDpPerSec + shrinkIncreasePerGame * g))
         driftAmp = if (g >= driftStartsAtGame) dp(min(maxDriftDp, (g - driftStartsAtGame + 1) * 4f)) else 0f
         wobbleAmp = if (g >= wobbleStartsAtGame) dp(min(maxWobbleDp, (g - wobbleStartsAtGame + 1) * 1f)) else 0f
+        difficultyMult = 1f +
+            (if (driftAmp > 0f) driftBonus else 0f) +
+            (if (wobbleAmp > 0f) wobbleBonus else 0f)
 
         // Random spawn, never right in the middle.
         val maxDist = outerR - ir - dp(12f)
@@ -126,6 +172,8 @@ class GameView(context: Context) : View(context) {
 
         moves = 0
         elapsed = 0f
+        points = 0f
+        newBest = false
         dragging = false
         state = State.READY
         invalidate()
@@ -137,19 +185,39 @@ class GameView(context: Context) : View(context) {
         invalidate()
     }
 
+    private fun currentScore(): Int =
+        max(0, (points * difficultyMult).toInt() - penaltyPerMove * max(0, moves - 1))
+
     private fun gameOver() {
         state = State.OVER
         dragging = false
-        lastScore = max(0, (elapsed * pointsPerSecond).toInt() - penaltyPerMove * max(0, moves - 1))
+        lastScore = currentScore()
         gamesPlayed++
-        if (lastScore > best) best = lastScore
+        if (lastScore > best) {
+            best = lastScore
+            newBest = true
+        }
         prefs.edit().putInt("games", gamesPlayed).putInt("best", best).apply()
         overAtMs = System.currentTimeMillis()
     }
 
+    // DEBUG: wipes saved games and best score — remove before release
+    private fun resetAll() {
+        prefs.edit().clear().apply()
+        gamesPlayed = 0
+        best = 0
+        lastScore = 0
+        newRound()
+    }
+
     private fun update(dt: Float) {
         elapsed += dt
-        outerR -= shrinkSpeed * dt
+        val shrink = shrinkSpeed * dt
+        // Endurance bonus: the further the ring has closed, the more each dp is worth.
+        val progress = ((startOuterR - outerR) / startOuterR).coerceIn(0f, 1f)
+        points += (shrink / density) * pointsPerDp * (1f + enduranceBonusMax * progress)
+        outerR -= shrink
+
         if (driftAmp > 0f) {
             outerCx = baseCx + driftAmp * sin(elapsed * 0.6f)
             outerCy = baseCy + driftAmp * sin(elapsed * 0.43f)
@@ -175,6 +243,34 @@ class GameView(context: Context) : View(context) {
         return false
     }
 
+    private fun lerpColor(a: Int, b: Int, t: Float): Int {
+        val u = t.coerceIn(0f, 1f)
+        return Color.rgb(
+            (Color.red(a) + (Color.red(b) - Color.red(a)) * u).toInt(),
+            (Color.green(a) + (Color.green(b) - Color.green(a)) * u).toInt(),
+            (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * u).toInt()
+        )
+    }
+
+    private fun withAlpha(c: Int, a: Int) = Color.argb(a, Color.red(c), Color.green(c), Color.blue(c))
+
+    /** Ring color slides from cyan to yellow to red as the gap closes. */
+    private fun ringColor(): Int {
+        if (state == State.OVER) return dangerColor
+        val gap = outerR - wobbleAmp - (hypot(ix - outerCx, iy - outerCy) + ir)
+        val t = (gap / dp(70f)).coerceIn(0f, 1f)
+        return if (t > 0.5f) lerpColor(warnColor, safeColor, (t - 0.5f) * 2f)
+        else lerpColor(dangerColor, warnColor, t * 2f)
+    }
+
+    private fun drawRing(canvas: Canvas, paint: Paint) {
+        if (wobbleAmp == 0f) {
+            canvas.drawCircle(outerCx, outerCy, max(0f, outerR), paint)
+        } else {
+            canvas.drawPath(outerPath, paint)
+        }
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
@@ -185,13 +281,10 @@ class GameView(context: Context) : View(context) {
             update(dt)
         }
 
-        canvas.drawColor(Color.rgb(16, 20, 24))
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-        // Outer ring
-        outerPaint.color = if (state == State.OVER) Color.rgb(255, 90, 90) else Color.WHITE
-        if (wobbleAmp == 0f) {
-            canvas.drawCircle(outerCx, outerCy, max(0f, outerR), outerPaint)
-        } else {
+        // Outer ring with a soft glow
+        if (wobbleAmp > 0f) {
             outerPath.reset()
             val steps = 120
             for (i in 0..steps) {
@@ -202,39 +295,91 @@ class GameView(context: Context) : View(context) {
                 if (i == 0) outerPath.moveTo(x, y) else outerPath.lineTo(x, y)
             }
             outerPath.close()
-            canvas.drawPath(outerPath, outerPaint)
         }
+        val rc = ringColor()
+        ringGlow.color = withAlpha(rc, 55)
+        ringPaint.color = rc
+        drawRing(canvas, ringGlow)
+        drawRing(canvas, ringPaint)
 
-        // Inner circle
+        // Inner circle: color shifts from mint to purple as it grows
+        val growth = (ir / dp(innerStartRadiusDp) - 1f) / 2f   // 0 at start, 1 at 3x size
+        val ic = lerpColor(innerSmall, innerBig, growth)
+        innerGlow.color = withAlpha(ic, 60)
+        canvas.drawCircle(ix, iy, ir + dp(8f), innerGlow)
+        innerPaint.shader = RadialGradient(
+            ix - ir * 0.3f, iy - ir * 0.3f, ir * 1.3f,
+            lerpColor(ic, Color.WHITE, 0.55f), ic, Shader.TileMode.CLAMP
+        )
         canvas.drawCircle(ix, iy, ir, innerPaint)
 
         // HUD
-        val top = dp(70f)
-        canvas.drawText(String.format("%.2f", elapsed), width / 2f, top, bigText)
-        canvas.drawText("Moves: $moves   ·   Game ${gamesPlayed + if (state == State.OVER) 0 else 1}",
-            width / 2f, top + dp(30f), smallText)
+        val level = if (state == State.OVER) gamesPlayed else gamesPlayed + 1
+        val cx = width / 2f
+        val top = dp(80f)
+        bigText.color = Color.WHITE
+        canvas.drawText(String.format("%.2f", elapsed), cx, top, bigText)
+        midText.color = accent
+        canvas.drawText("${currentScore()}", cx, top + dp(34f), midText)
+        smallText.color = muted
+        val mult = if (difficultyMult > 1f) "   ·   ×" + String.format("%.2f", difficultyMult) else ""
+        canvas.drawText("Level $level   ·   Moves $moves$mult", cx, top + dp(60f), smallText)
 
         when (state) {
-            State.READY -> canvas.drawText("Touch the circle to start",
-                width / 2f, height - dp(60f), smallText)
+            State.READY -> drawReady(canvas)
             State.OVER -> drawGameOver(canvas)
             State.PLAYING -> postInvalidateOnAnimation()
+        }
+
+        if (state != State.PLAYING) drawResetButton(canvas) // DEBUG
+    }
+
+    private fun drawReady(canvas: Canvas) {
+        val cx = width / 2f
+        val y = height - dp(60f)
+        smallText.color = muted
+        canvas.drawText("Touch the circle to start", cx, y, smallText)
+        val note = when (gamesPlayed) {
+            driftStartsAtGame -> "New: the ring drifts!  Score ×${String.format("%.2f", difficultyMult)}"
+            wobbleStartsAtGame -> "New: the ring wobbles!  Score ×${String.format("%.2f", difficultyMult)}"
+            else -> null
+        }
+        if (note != null) {
+            smallText.color = warnColor
+            canvas.drawText(note, cx, y - dp(28f), smallText)
         }
     }
 
     private fun drawGameOver(canvas: Canvas) {
-        canvas.drawColor(Color.argb(170, 0, 0, 0))
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), overlayPaint)
         val cx = width / 2f
         var y = height / 2f - dp(90f)
+        bigText.color = dangerColor
         canvas.drawText("Game over", cx, y, bigText)
-        y += dp(50f)
+        y += dp(46f)
+        smallText.color = muted
         canvas.drawText(String.format("Time %.2f s   ·   Moves %d", elapsed, moves), cx, y, smallText)
-        y += dp(50f)
-        canvas.drawText("Score $lastScore", cx, y, bigText)
-        y += dp(34f)
-        canvas.drawText("Best $best", cx, y, smallText)
+        y += dp(56f)
+        bigText.color = if (newBest) gold else accent
+        canvas.drawText("$lastScore", cx, y, bigText)
+        y += dp(30f)
+        if (newBest) {
+            midText.color = gold
+            canvas.drawText("NEW BEST!", cx, y, midText)
+        } else {
+            smallText.color = muted
+            canvas.drawText("Best $best", cx, y, smallText)
+        }
         y += dp(70f)
+        smallText.color = Color.WHITE
         canvas.drawText("Tap to play again", cx, y, smallText)
+    }
+
+    // DEBUG: remove before release
+    private fun drawResetButton(canvas: Canvas) {
+        canvas.drawRoundRect(resetRect, dp(8f), dp(8f), resetFill)
+        val ty = resetRect.centerY() - (resetText.descent() + resetText.ascent()) / 2f
+        canvas.drawText("RESET", resetRect.centerX(), ty, resetText)
     }
 
     private fun touchesInner(x: Float, y: Float) = hypot(x - ix, y - iy) <= ir + dp(12f)
@@ -249,13 +394,20 @@ class GameView(context: Context) : View(context) {
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> when (state) {
-                State.READY -> if (touchesInner(e.x, e.y)) {
-                    startGame()
-                    grab(e.x, e.y)
+            MotionEvent.ACTION_DOWN -> {
+                // DEBUG: reset button, only when not mid-game
+                if (state != State.PLAYING && resetRect.contains(e.x, e.y)) {
+                    resetAll()
+                    return true
                 }
-                State.PLAYING -> if (touchesInner(e.x, e.y)) grab(e.x, e.y)
-                State.OVER -> if (System.currentTimeMillis() - overAtMs > 700) newRound()
+                when (state) {
+                    State.READY -> if (touchesInner(e.x, e.y)) {
+                        startGame()
+                        grab(e.x, e.y)
+                    }
+                    State.PLAYING -> if (touchesInner(e.x, e.y)) grab(e.x, e.y)
+                    State.OVER -> if (System.currentTimeMillis() - overAtMs > 700) newRound()
+                }
             }
             MotionEvent.ACTION_MOVE -> if (dragging && state == State.PLAYING) {
                 val nx = e.x + grabDx
