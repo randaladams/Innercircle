@@ -70,14 +70,15 @@ class GameView(context: Context) : View(context) {
     private val parPercentMin = 0.55f         // share needed when the ring roams and spins the most
     // Endless ramp: everything else maxes out around level 21, so from there par keeps creeping up.
     private val parCreepStartsAtLevel = 21    // par starts creeping up at this level...
-    private val parCreepPerLevel = 0.015f     // ...by 1.5% of perfect every level...
-    private val parPercentCap = 0.95f         // ...until it needs 95% of a perfect run
+    private val parCreepPerLevel = 0.005f     // ...by 0.5% of perfect every level...
+    private val parPercentCap = 0.78f         // ...until it needs 78% of a perfect run (around level 66)
     private val mercyPerFail = 0.05f          // par drops 5% for each miss on the current level...
     private val mercyFloor = 0.70f            // ...but never below 70% of its normal value
 
     // Tries and revives
     private val strikesPerGame = 3            // miss par this many times in one game and it's over
     private val revivesPerRun = 1             // revives (after watching an ad) allowed per game
+    private val roundsToEarnStrike = 5        // clear this many levels in a row without a strike to get one back
     private val fakeAdSeconds = 5             // length of the placeholder ad
 
     // Sound
@@ -129,6 +130,8 @@ class GameView(context: Context) : View(context) {
     private var runScore = prefs.getInt("runScore", 0)          // every round's score added up this run
     private var revivesLeft = prefs.getInt("revivesLeft", revivesPerRun)
     private var levelFails = prefs.getInt("levelFails", 0)      // misses on the current level (for mercy)
+    private var cleanStreak = prefs.getInt("cleanStreak", 0)    // levels cleared in a row without a strike
+    private var earnsStrike = false           // this round's clear earns a strike back
     private var best = prefs.getInt("best", 0)                  // best run score ever
     private var bestLevel = prefs.getInt("bestLevel", 0)        // ...and the level that run reached
     private var levelBest = 0                 // your best single round on this level
@@ -562,6 +565,7 @@ class GameView(context: Context) : View(context) {
         newHighScore = best > 0 && runScore + lastScore > best
         cleared = lastScore >= par
         outOfTries = !cleared && triesLeft <= 1
+        earnsStrike = cleared && triesLeft < strikesPerGame && cleanStreak + 1 >= roundsToEarnStrike
         overAtMs = System.currentTimeMillis()
     }
 
@@ -576,9 +580,15 @@ class GameView(context: Context) : View(context) {
         if (cleared) {
             level = playedLevel + 1
             levelFails = 0
+            cleanStreak += 1
+            if (cleanStreak >= roundsToEarnStrike) {
+                if (triesLeft < strikesPerGame) triesLeft += 1    // strike earned back (max 3)
+                cleanStreak = 0
+            }
         } else {
             triesLeft -= 1          // strike!
             levelFails += 1
+            cleanStreak = 0
         }
         if (outOfTries) {
             newBest = runScore > best
@@ -593,6 +603,7 @@ class GameView(context: Context) : View(context) {
             .putInt("runScore", runScore)
             .putInt("revivesLeft", revivesLeft)
             .putInt("levelFails", levelFails)
+            .putInt("cleanStreak", cleanStreak)
             .apply()
         if (outOfTries) {
             state = State.RUN_OVER
@@ -610,9 +621,11 @@ class GameView(context: Context) : View(context) {
         runScore = 0
         revivesLeft = revivesPerRun
         levelFails = 0
+        cleanStreak = 0
         lastShape = null
         prefs.edit()
             .putInt("levelFails", levelFails)
+            .putInt("cleanStreak", cleanStreak)
             .putInt("level", level)
             .putInt("triesLeft", triesLeft)
             .putInt("runScore", runScore)
@@ -802,6 +815,10 @@ class GameView(context: Context) : View(context) {
         val inRound = state == State.PLAYING || state == State.OVER
         val live = runScore + if (inRound) score else 0
         canvas.drawText("Run $live    Strikes ${triesDots()}", dp(16f), dp(50f), cornerText)
+        if (triesLeft < strikesPerGame) {
+            // Progress toward earning a strike back
+            canvas.drawText("Streak $cleanStreak/$roundsToEarnStrike", dp(16f), dp(70f), cornerText)
+        }
 
         when (state) {
             State.READY -> drawReady(canvas)
@@ -915,6 +932,11 @@ class GameView(context: Context) : View(context) {
             cleared -> {
                 smallText.color = innerSmall
                 canvas.drawText("Level cleared! On to Level ${playedLevel + 1}", cx, y, smallText)
+                if (earnsStrike) {
+                    y += dp(28f)
+                    midText.color = innerSmall
+                    canvas.drawText("$roundsToEarnStrike in a row: strike erased!", cx, y, midText)
+                }
             }
             outOfTries -> {
                 midText.color = dangerColor
