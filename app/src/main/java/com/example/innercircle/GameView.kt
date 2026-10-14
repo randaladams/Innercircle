@@ -68,6 +68,10 @@ class GameView(context: Context) : View(context) {
     // It already accounts for the shape, the spawn distance and the ring speed.
     private val parPercentStart = 0.70f       // share of perfect needed when the ring barely moves
     private val parPercentMin = 0.55f         // share needed when the ring roams and spins the most
+    // Endless ramp: everything else maxes out around level 21, so from there par keeps creeping up.
+    private val parCreepStartsAtLevel = 21    // par starts creeping up at this level...
+    private val parCreepPerLevel = 0.015f     // ...by 1.5% of perfect every level...
+    private val parPercentCap = 0.95f         // ...until it needs 95% of a perfect run
     private val mercyPerFail = 0.05f          // par drops 5% for each miss on the current level...
     private val mercyFloor = 0.70f            // ...but never below 70% of its normal value
 
@@ -136,6 +140,7 @@ class GameView(context: Context) : View(context) {
     private var lastScore = 0
     private var newBest = false
     private var newLevelBest = false
+    private var newHighScore = false          // this game's total just passed the all-time high score
     private var cleared = false
     private var outOfTries = false
     private var paused = false                // after a revive: waits for a touch before resuming
@@ -472,6 +477,10 @@ class GameView(context: Context) : View(context) {
         // A ring that roams and spins can't be played perfectly, so it asks for a smaller share.
         val movement = (0.5f * wanderAmp / dp(maxWanderDp) + 0.5f * abs(shapeSpin) / maxSpin).coerceIn(0f, 1f)
         parPercent = parPercentStart - (parPercentStart - parPercentMin) * movement
+        if (playedLevel >= parCreepStartsAtLevel) {
+            val creep = parCreepPerLevel * (playedLevel - parCreepStartsAtLevel + 1)
+            parPercent = min(parPercentCap, parPercent + creep)
+        }
         mercy = max(mercyFloor, 1f - mercyPerFail * levelFails)
         par = max(1, (perfect * parPercent * mercy).toInt())
     }
@@ -550,6 +559,7 @@ class GameView(context: Context) : View(context) {
         sound.crash()
         lastScore = currentScore()
         newLevelBest = lastScore > levelBest
+        newHighScore = best > 0 && runScore + lastScore > best
         cleared = lastScore >= par
         outOfTries = !cleared && triesLeft <= 1
         overAtMs = System.currentTimeMillis()
@@ -897,13 +907,9 @@ class GameView(context: Context) : View(context) {
         bigText.color = if (newLevelBest) gold else accent
         canvas.drawText("$lastScore", cx, y, bigText)
         y += dp(30f)
-        if (newLevelBest) {
-            midText.color = gold
-            canvas.drawText("Level $playedLevel best!", cx, y, midText)
-        } else {
-            smallText.color = muted
-            canvas.drawText("Level $playedLevel best $levelBest", cx, y, smallText)
-        }
+        smallText.color = muted
+        val prevLabel = if (newLevelBest) "Previous level best" else "Level best"
+        canvas.drawText("$prevLabel $levelBest", cx, y, smallText)
         y += dp(34f)
         when {
             cleared -> {
@@ -921,6 +927,17 @@ class GameView(context: Context) : View(context) {
                 val word = if (left == 1) "strike" else "strikes"
                 canvas.drawText("Strike!  $pctOfPar% of par  ·  $left $word left", cx, y, smallText)
             }
+        }
+        // Blinking gold banner for a new best
+        if (newHighScore || newLevelBest) {
+            y += dp(34f)
+            val on = (System.currentTimeMillis() / 450) % 2 == 0L
+            if (on) {
+                midText.color = gold
+                val msg = if (newHighScore) "★ NEW HIGH SCORE! ★" else "★ NEW LEVEL BEST! ★"
+                canvas.drawText(msg, cx, y, midText)
+            }
+            postInvalidateOnAnimation()
         }
         y += dp(36f)
         if (reviveAvailable()) {
