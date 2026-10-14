@@ -68,8 +68,13 @@ class GameView(context: Context) : View(context) {
     // It already accounts for the shape, the spawn distance and the ring speed.
     private val parPercentStart = 0.70f       // share of perfect needed when the ring barely moves
     private val parPercentMin = 0.55f         // share needed when the ring roams and spins the most
-    private val mercyPerFail = 0.05f          // par drops 5% for each failed try on a level...
+    private val mercyPerFail = 0.05f          // par drops 5% for each try used up on a level...
     private val mercyFloor = 0.70f            // ...but never below 70% of its normal value
+
+    // Tries and revives
+    private val triesPerLevel = 3             // fail a level this many times and the run is over
+    private val revivesPerRun = 1             // revives (after watching an ad) allowed per run
+    private val fakeAdSeconds = 5             // length of the placeholder ad
 
     // Sound
     private val humLowHz = 70f                // hum pitch when the ring is full size
@@ -103,7 +108,7 @@ class GameView(context: Context) : View(context) {
     private val muted = Color.rgb(160, 172, 200)
     // ==========================================
 
-    private enum class State { READY, PLAYING, OVER }
+    private enum class State { READY, PLAYING, OVER, AD, RUN_OVER }
 
     private val prefs = context.getSharedPreferences("inner_circle", Context.MODE_PRIVATE)
     private val sound = SoundEngine()
@@ -113,22 +118,27 @@ class GameView(context: Context) : View(context) {
 
     private var state = State.READY
 
-    // Progress. You stay on a level until you reach its par score, then move up.
+    // A run starts at level 1. Reach par to move up; fail a level too many times and the run ends.
     private var level = prefs.getInt("level", 1)
     private var playedLevel = level           // the level of the round on screen
-    private var best = prefs.getInt("best", 0)            // best single run, any level
-    private var bestLevel = prefs.getInt("bestLevel", 0)  // ...and the level it was set on
-    private var total = prefs.getInt("total", 0)          // sum of your best score on every level
-    private var levelBest = 0                 // your best on the level being played
+    private var triesLeft = prefs.getInt("triesLeft", triesPerLevel)
+    private var runScore = prefs.getInt("runScore", 0)          // every round's score added up this run
+    private var revivesLeft = prefs.getInt("revivesLeft", revivesPerRun)
+    private var best = prefs.getInt("best", 0)                  // best run score ever
+    private var bestLevel = prefs.getInt("bestLevel", 0)        // ...and the level that run reached
+    private var levelBest = 0                 // your best single round on this level
     private var par = 0
     private var perfect = 0                   // best possible score for this round
     private var parPercent = 0f               // share of perfect needed this round
-    private var mercy = 1f                    // par reduction from failed tries
-    private var fails = 0                     // failed tries on this level
+    private var mercy = 1f                    // par reduction from tries already used
+    private var unitInr = 1f                  // room at the shape's tightest point (1.0 = circle)
     private var lastScore = 0
     private var newBest = false
     private var newLevelBest = false
     private var cleared = false
+    private var outOfTries = false
+    private var paused = false                // after a revive: waits for a touch before resuming
+    private var adEndsAt = 0L
 
     // Outer shape
     private var shape = Shape.CIRCLE
@@ -204,6 +214,24 @@ class GameView(context: Context) : View(context) {
     }
     private val outerPath = Path()
 
+    // Progress bar, revive button and fake ad
+    private val barBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(60, 255, 255, 255) }
+    private val barFill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tinyText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    private val barRect = RectF()
+    private val reviveRect = RectF()
+    private val reviveFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(255, 180, 40) }
+    private val reviveText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(40, 25, 0)
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    private val adBg = Paint().apply { color = Color.rgb(240, 240, 246) }
+
     // DEBUG: safe spot finder — remove before release
     private val safeButtonEnabled = false   // set to true to bring the SAFE button back
     private var showSafe = false
@@ -235,6 +263,9 @@ class GameView(context: Context) : View(context) {
         ringPaint.strokeWidth = dp(3f)
         ringGlow.strokeWidth = dp(14f)
         fingerPaint.strokeWidth = dp(2f)
+        tickPaint.strokeWidth = dp(2f)
+        tinyText.textSize = dp(10f)
+        reviveText.textSize = dp(18f)
         safePaint.strokeWidth = dp(2f)
         safePaint.pathEffect = DashPathEffect(floatArrayOf(dp(6f), dp(5f)), 0f)
         safeText.textSize = dp(13f)
@@ -361,7 +392,6 @@ class GameView(context: Context) : View(context) {
         wobbleAmp = if (level >= wobbleStartsAtLevel) dp(min(maxWobbleDp, (level - wobbleStartsAtLevel + 1) * 1f)) else 0f
         levelMult = 1f + levelBonusPerLevel * g
         levelBest = prefs.getInt("lvl_$level", 0)
-        fails = prefs.getInt("fails_$level", 0)
 
         // Random shape, random starting angle, random spin direction.
         shape = pickShape()
@@ -407,6 +437,8 @@ class GameView(context: Context) : View(context) {
         newBest = false
         newLevelBest = false
         cleared = false
+        outOfTries = false
+        paused = false
         fingerDown = false
         state = State.READY
         sound.humVolume = 0f
@@ -425,6 +457,7 @@ class GameView(context: Context) : View(context) {
             val r = unitRadius(twoPi * i / 720)
             if (r < inr) inr = r
         }
+        unitInr = inr
         // Perfect run: drag straight to the center, growing on the way...
         val d = hypot(ix - baseCx, iy - baseCy)
         val irFinal = ir + d * growthPerDistance
@@ -438,7 +471,7 @@ class GameView(context: Context) : View(context) {
         // A ring that roams and spins can't be played perfectly, so it asks for a smaller share.
         val movement = (0.5f * wanderAmp / dp(maxWanderDp) + 0.5f * abs(shapeSpin) / maxSpin).coerceIn(0f, 1f)
         parPercent = parPercentStart - (parPercentStart - parPercentMin) * movement
-        mercy = max(mercyFloor, 1f - mercyPerFail * fails)
+        mercy = max(mercyFloor, 1f - mercyPerFail * (triesPerLevel - triesLeft))
         par = max(1, (perfect * parPercent * mercy).toInt())
     }
 
@@ -508,54 +541,104 @@ class GameView(context: Context) : View(context) {
     private fun currentScore(): Int =
         max(0, (points * scoreMult - movedDp * penaltyPerDpMoved).toInt())
 
+    /** The circles touched. Work out the result, but don't save it yet: the player may revive. */
     private fun gameOver() {
         state = State.OVER
         fingerDown = false
         sound.humVolume = 0f
         sound.crash()
         lastScore = currentScore()
-
-        // Per-level best; the total is the sum of all of them.
-        if (lastScore > levelBest) {
-            total += lastScore - levelBest
-            levelBest = lastScore
-            newLevelBest = true
-        }
-        // Best single run anywhere, with the level it happened on.
-        if (lastScore > best) {
-            best = lastScore
-            bestLevel = playedLevel
-            newBest = true
-        }
-        // Reach par to move up a level; otherwise you replay this one (and par eases a little).
+        newLevelBest = lastScore > levelBest
         cleared = lastScore >= par
-        val ed = prefs.edit()
-        if (cleared) {
-            level = playedLevel + 1
-            ed.remove("fails_$playedLevel")
-        } else {
-            ed.putInt("fails_$playedLevel", fails + 1)
-        }
-        ed
-            .putInt("lvl_$playedLevel", levelBest)
-            .putInt("total", total)
-            .putInt("best", best)
-            .putInt("bestLevel", bestLevel)
-            .putInt("level", level)
-            .apply()
+        outOfTries = !cleared && triesLeft <= 1
         overAtMs = System.currentTimeMillis()
     }
 
-    // DEBUG: wipes saved games and best score — remove before release
+    /** The player moved on without reviving: lock in the round's result. */
+    private fun commitRound() {
+        val ed = prefs.edit()
+        if (newLevelBest) {
+            levelBest = lastScore
+            ed.putInt("lvl_$playedLevel", levelBest)
+        }
+        runScore += lastScore
+        if (cleared) {
+            level = playedLevel + 1
+            triesLeft = triesPerLevel
+        } else {
+            triesLeft -= 1
+        }
+        if (outOfTries) {
+            newBest = runScore > best
+            if (newBest) {
+                best = runScore
+                bestLevel = playedLevel
+            }
+            ed.putInt("best", best).putInt("bestLevel", bestLevel)
+        }
+        ed.putInt("level", level)
+            .putInt("triesLeft", triesLeft)
+            .putInt("runScore", runScore)
+            .putInt("revivesLeft", revivesLeft)
+            .apply()
+        if (outOfTries) {
+            state = State.RUN_OVER
+            overAtMs = System.currentTimeMillis()
+            invalidate()
+        } else {
+            newRound()
+        }
+    }
+
+    /** Start a fresh run from level 1. */
+    private fun newRun() {
+        level = 1
+        triesLeft = triesPerLevel
+        runScore = 0
+        revivesLeft = revivesPerRun
+        lastShape = null
+        prefs.edit()
+            .putInt("level", level)
+            .putInt("triesLeft", triesLeft)
+            .putInt("runScore", runScore)
+            .putInt("revivesLeft", revivesLeft)
+            .apply()
+        newRound()
+    }
+
+    private fun reviveAvailable() = revivesLeft > 0 && !cleared
+
+    /** Placeholder for a real rewarded ad. */
+    private fun startAd() {
+        state = State.AD
+        adEndsAt = System.currentTimeMillis() + fakeAdSeconds * 1000L
+        invalidate()
+    }
+
+    /** Ad watched: put the round back in play with room to breathe. */
+    private fun revive() {
+        revivesLeft -= 1
+        prefs.edit().putInt("revivesLeft", revivesLeft).apply()
+        // Fresh-size circle in the middle of the ring, and grow the ring back if it's too tight.
+        ir = dp(innerStartRadiusDp)
+        val needed = (ir * 2.5f + wobbleAmp) / unitInr
+        if (outerR < needed) outerR = min(needed, startOuterR)
+        ix = outerCx
+        iy = outerCy
+        state = State.PLAYING
+        paused = true
+        fingerDown = false
+        lastFrameNs = 0L
+        invalidate()
+    }
+
+    // DEBUG: wipes all saved progress and scores — remove before release
     private fun resetAll() {
         prefs.edit().clear().apply()
-        level = 1
         best = 0
         bestLevel = 0
-        total = 0
         lastScore = 0
-        lastShape = null
-        newRound()
+        newRun()
     }
 
     private fun update(dt: Float) {
@@ -642,7 +725,7 @@ class GameView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        if (state == State.PLAYING) {
+        if (state == State.PLAYING && !paused) {
             val now = System.nanoTime()
             val dt = if (lastFrameNs == 0L) 0f else min(0.05f, (now - lastFrameNs) / 1e9f)
             lastFrameNs = now
@@ -693,29 +776,73 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("$score", cx, top + dp(34f), midText)
         smallText.color = muted
         canvas.drawText("Level $playedLevel  ·  Par $par  ·  Moved ${movedDp.toInt()}", cx, top + dp(60f), smallText)
+        drawProgress(canvas, score)
 
         // High score with its level, and the running total, in the top-left corner
         cornerText.color = gold
         val bestLine = if (best > 0) "High score $best  ·  Level $bestLevel" else "High score —"
         canvas.drawText(bestLine, dp(16f), dp(30f), cornerText)
         cornerText.color = muted
-        canvas.drawText("Total $total", dp(16f), dp(50f), cornerText)
+        val inRound = state == State.PLAYING || state == State.OVER
+        val live = runScore + if (inRound) score else 0
+        canvas.drawText("Run $live    Tries ${triesDots()}", dp(16f), dp(50f), cornerText)
 
         when (state) {
             State.READY -> drawReady(canvas)
             State.OVER -> drawGameOver(canvas)
             State.PLAYING -> {
-                if (!fingerDown) {
-                    smallText.color = gold
-                    val pm = String.format("%.0f", handsOffPointsMultiplier)
-                    canvas.drawText("HANDS OFF: points ×$pm   ·   touch to slow", cx, height - dp(60f), smallText)
+                if (paused) {
+                    midText.color = innerSmall
+                    canvas.drawText("Revived! Touch to continue", cx, height - dp(60f), midText)
+                } else {
+                    if (!fingerDown) {
+                        smallText.color = gold
+                        val pm = String.format("%.0f", handsOffPointsMultiplier)
+                        canvas.drawText("HANDS OFF: points ×$pm   ·   touch to slow", cx, height - dp(60f), smallText)
+                    }
+                    postInvalidateOnAnimation()
                 }
-                postInvalidateOnAnimation()
             }
+            State.AD -> drawAd(canvas)
+            State.RUN_OVER -> drawRunOver(canvas)
         }
 
-        if (state != State.PLAYING) drawResetButton(canvas) // DEBUG
+        if (state != State.PLAYING && state != State.AD) drawResetButton(canvas) // DEBUG
         if (safeButtonEnabled && state == State.READY) drawSafeButton(canvas)     // DEBUG
+    }
+
+    private fun triesDots() = (1..triesPerLevel).joinToString(" ") { if (it <= triesLeft) "●" else "○" }
+
+    /** Fills toward par, then keeps going. The full bar is a perfect run. */
+    private fun drawProgress(canvas: Canvas, score: Int) {
+        val left = dp(32f)
+        val right = width - dp(32f)
+        val y = dp(166f)
+        val h = dp(8f)
+        val full = max(1, maxOf(perfect, score, par, levelBest)).toFloat()
+        fun xOf(v: Int) = left + (right - left) * (v / full).coerceIn(0f, 1f)
+
+        barRect.set(left, y, right, y + h)
+        canvas.drawRoundRect(barRect, h / 2, h / 2, barBg)
+        if (score > 0) {
+            barFill.color = if (score >= par) innerSmall else accent   // mint once you pass par
+            barRect.set(left, y, max(left + h, xOf(score)), y + h)
+            canvas.drawRoundRect(barRect, h / 2, h / 2, barFill)
+        }
+        // Par mark
+        val px = xOf(par)
+        tickPaint.color = Color.WHITE
+        canvas.drawLine(px, y - dp(5f), px, y + h + dp(5f), tickPaint)
+        tinyText.color = Color.WHITE
+        canvas.drawText("PAR", px, y - dp(8f), tinyText)
+        // Your best on this level
+        if (levelBest > 0) {
+            val bx = xOf(levelBest)
+            tickPaint.color = gold
+            canvas.drawLine(bx, y - dp(5f), bx, y + h + dp(5f), tickPaint)
+            tinyText.color = gold
+            canvas.drawText("BEST", bx, y + h + dp(17f), tinyText)
+        }
     }
 
     private fun drawReady(canvas: Canvas) {
@@ -729,7 +856,7 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("Level $playedLevel  ·  ${shape.label}  ·  Score ×$mult", cx, y - dp(28f), smallText)
         smallText.color = innerSmall
         val pct = (parPercent * 100).toInt()
-        val mercyText = if (mercy < 1f) "  (−${((1f - mercy) * 100).toInt()}% after $fails tries)" else ""
+        val mercyText = if (mercy < 1f) "  (−${((1f - mercy) * 100).toInt()}% mercy)" else ""
         canvas.drawText("Par $par = $pct% of perfect$mercyText", cx, y - dp(52f), smallText)
         smallText.color = muted
         val bestText = if (levelBest > 0) "Your best on this level: $levelBest" else "Level not played yet"
@@ -753,42 +880,101 @@ class GameView(context: Context) : View(context) {
     private fun drawGameOver(canvas: Canvas) {
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), overlayPaint)
         val cx = width / 2f
-        var y = height / 2f - dp(90f)
+        var y = height / 2f - dp(110f)
         bigText.color = dangerColor
-        canvas.drawText("Game over", cx, y, bigText)
+        canvas.drawText("Crashed!", cx, y, bigText)
         y += dp(46f)
         smallText.color = muted
         canvas.drawText(String.format("Time %.2f s   ·   Moved %d", elapsed, movedDp.toInt()), cx, y, smallText)
         y += dp(56f)
-        bigText.color = if (newBest) gold else accent
+        bigText.color = if (newLevelBest) gold else accent
         canvas.drawText("$lastScore", cx, y, bigText)
         y += dp(30f)
-        when {
-            newBest -> {
-                midText.color = gold
-                canvas.drawText("NEW HIGH SCORE!", cx, y, midText)
-            }
-            newLevelBest -> {
-                midText.color = gold
-                canvas.drawText("Level $playedLevel best!", cx, y, midText)
-            }
-            else -> {
-                smallText.color = muted
-                canvas.drawText("Level $playedLevel best $levelBest", cx, y, smallText)
-            }
+        if (newLevelBest) {
+            midText.color = gold
+            canvas.drawText("Level $playedLevel best!", cx, y, midText)
+        } else {
+            smallText.color = muted
+            canvas.drawText("Level $playedLevel best $levelBest", cx, y, smallText)
         }
         y += dp(34f)
-        if (cleared) {
-            smallText.color = innerSmall
-            canvas.drawText("Level cleared! On to Level $level", cx, y, smallText)
-        } else {
-            smallText.color = warnColor
-            val pctOfPar = if (par > 0) lastScore * 100 / par else 0
-            canvas.drawText("$pctOfPar% of par  ·  Score $par to clear Level $playedLevel", cx, y, smallText)
+        when {
+            cleared -> {
+                smallText.color = innerSmall
+                canvas.drawText("Level cleared! On to Level ${playedLevel + 1}", cx, y, smallText)
+            }
+            outOfTries -> {
+                midText.color = dangerColor
+                canvas.drawText("Out of tries!", cx, y, midText)
+            }
+            else -> {
+                smallText.color = warnColor
+                val pctOfPar = if (par > 0) lastScore * 100 / par else 0
+                val left = triesLeft - 1
+                val word = if (left == 1) "try" else "tries"
+                canvas.drawText("$pctOfPar% of par  ·  $left $word left", cx, y, smallText)
+            }
         }
-        y += dp(56f)
+        y += dp(36f)
+        if (reviveAvailable()) {
+            reviveRect.set(cx - dp(130f), y, cx + dp(130f), y + dp(52f))
+            canvas.drawRoundRect(reviveRect, dp(26f), dp(26f), reviveFill)
+            val ty = reviveRect.centerY() - (reviveText.descent() + reviveText.ascent()) / 2f
+            canvas.drawText("▶  Watch ad to revive", cx, ty, reviveText)
+            y += dp(84f)
+            smallText.color = Color.WHITE
+            canvas.drawText("Tap anywhere else to continue", cx, y, smallText)
+        } else {
+            reviveRect.setEmpty()
+            y += dp(30f)
+            smallText.color = Color.WHITE
+            canvas.drawText("Tap to continue", cx, y, smallText)
+        }
+    }
+
+    private fun drawRunOver(canvas: Canvas) {
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), overlayPaint)
+        val cx = width / 2f
+        var y = height / 2f - dp(100f)
+        bigText.color = dangerColor
+        canvas.drawText("GAME OVER", cx, y, bigText)
+        y += dp(42f)
+        smallText.color = muted
+        canvas.drawText("Out of tries on Level $playedLevel", cx, y, smallText)
+        y += dp(60f)
+        bigText.color = if (newBest) gold else accent
+        canvas.drawText("$runScore", cx, y, bigText)
+        y += dp(30f)
+        if (newBest) {
+            midText.color = gold
+            canvas.drawText("NEW HIGH SCORE!", cx, y, midText)
+        } else {
+            smallText.color = muted
+            canvas.drawText("High score $best  ·  Level $bestLevel", cx, y, smallText)
+        }
+        y += dp(70f)
         smallText.color = Color.WHITE
-        canvas.drawText("Tap to play again", cx, y, smallText)
+        canvas.drawText("Tap to start a new run", cx, y, smallText)
+    }
+
+    // Placeholder for a real rewarded video ad (to be replaced with Google AdMob later).
+    private fun drawAd(canvas: Canvas) {
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), adBg)
+        val cx = width / 2f
+        val cy = height / 2f
+        midText.color = Color.rgb(50, 50, 70)
+        canvas.drawText("ADVERTISEMENT", cx, cy - dp(40f), midText)
+        smallText.color = Color.rgb(120, 120, 140)
+        canvas.drawText("Fake ad for testing", cx, cy - dp(10f), smallText)
+        val secs = ((adEndsAt - System.currentTimeMillis() + 999) / 1000).toInt()
+        if (secs > 0) {
+            bigText.color = Color.rgb(50, 50, 70)
+            canvas.drawText("$secs", cx, cy + dp(60f), bigText)
+            postInvalidateOnAnimation()
+        } else {
+            midText.color = Color.rgb(20, 140, 80)
+            canvas.drawText("Tap to revive", cx, cy + dp(55f), midText)
+        }
     }
 
     // DEBUG: remove before release
@@ -841,7 +1027,7 @@ class GameView(context: Context) : View(context) {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 // DEBUG: reset button, only when not mid-game
-                if (state != State.PLAYING && resetRect.contains(e.x, e.y)) {
+                if (state != State.PLAYING && state != State.AD && resetRect.contains(e.x, e.y)) {
                     resetAll()
                     return true
                 }
@@ -857,8 +1043,21 @@ class GameView(context: Context) : View(context) {
                         startGame()
                         track(e, 0)
                     }
-                    State.PLAYING -> track(e, 0)
-                    State.OVER -> if (System.currentTimeMillis() - overAtMs > 700) newRound()
+                    State.PLAYING -> {
+                        if (paused) {
+                            paused = false
+                            sound.humVolume = humVolume
+                            lastFrameNs = 0L
+                            invalidate()
+                        }
+                        track(e, 0)
+                    }
+                    State.OVER -> {
+                        if (reviveAvailable() && reviveRect.contains(e.x, e.y)) startAd()
+                        else if (System.currentTimeMillis() - overAtMs > 700) commitRound()
+                    }
+                    State.AD -> if (System.currentTimeMillis() >= adEndsAt) revive()
+                    State.RUN_OVER -> if (System.currentTimeMillis() - overAtMs > 700) newRun()
                 }
             }
             MotionEvent.ACTION_MOVE -> if (fingerDown && state == State.PLAYING) {
