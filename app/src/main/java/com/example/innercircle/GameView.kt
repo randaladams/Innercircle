@@ -68,12 +68,12 @@ class GameView(context: Context) : View(context) {
     // It already accounts for the shape, the spawn distance and the ring speed.
     private val parPercentStart = 0.70f       // share of perfect needed when the ring barely moves
     private val parPercentMin = 0.55f         // share needed when the ring roams and spins the most
-    private val mercyPerFail = 0.05f          // par drops 5% for each try used up on a level...
+    private val mercyPerFail = 0.05f          // par drops 5% for each miss on the current level...
     private val mercyFloor = 0.70f            // ...but never below 70% of its normal value
 
     // Tries and revives
-    private val triesPerLevel = 3             // fail a level this many times and the run is over
-    private val revivesPerRun = 1             // revives (after watching an ad) allowed per run
+    private val strikesPerGame = 3            // miss par this many times in one game and it's over
+    private val revivesPerRun = 1             // revives (after watching an ad) allowed per game
     private val fakeAdSeconds = 5             // length of the placeholder ad
 
     // Sound
@@ -118,12 +118,13 @@ class GameView(context: Context) : View(context) {
 
     private var state = State.READY
 
-    // A run starts at level 1. Reach par to move up; fail a level too many times and the run ends.
+    // A game starts at level 1. Reach par to move up. Miss par and it's a strike; 3 strikes and you're out.
     private var level = prefs.getInt("level", 1)
     private var playedLevel = level           // the level of the round on screen
-    private var triesLeft = prefs.getInt("triesLeft", triesPerLevel)
+    private var triesLeft = prefs.getInt("triesLeft", strikesPerGame)   // strikes remaining this game
     private var runScore = prefs.getInt("runScore", 0)          // every round's score added up this run
     private var revivesLeft = prefs.getInt("revivesLeft", revivesPerRun)
+    private var levelFails = prefs.getInt("levelFails", 0)      // misses on the current level (for mercy)
     private var best = prefs.getInt("best", 0)                  // best run score ever
     private var bestLevel = prefs.getInt("bestLevel", 0)        // ...and the level that run reached
     private var levelBest = 0                 // your best single round on this level
@@ -471,7 +472,7 @@ class GameView(context: Context) : View(context) {
         // A ring that roams and spins can't be played perfectly, so it asks for a smaller share.
         val movement = (0.5f * wanderAmp / dp(maxWanderDp) + 0.5f * abs(shapeSpin) / maxSpin).coerceIn(0f, 1f)
         parPercent = parPercentStart - (parPercentStart - parPercentMin) * movement
-        mercy = max(mercyFloor, 1f - mercyPerFail * (triesPerLevel - triesLeft))
+        mercy = max(mercyFloor, 1f - mercyPerFail * levelFails)
         par = max(1, (perfect * parPercent * mercy).toInt())
     }
 
@@ -564,9 +565,10 @@ class GameView(context: Context) : View(context) {
         runScore += lastScore
         if (cleared) {
             level = playedLevel + 1
-            triesLeft = triesPerLevel
+            levelFails = 0
         } else {
-            triesLeft -= 1
+            triesLeft -= 1          // strike!
+            levelFails += 1
         }
         if (outOfTries) {
             newBest = runScore > best
@@ -580,6 +582,7 @@ class GameView(context: Context) : View(context) {
             .putInt("triesLeft", triesLeft)
             .putInt("runScore", runScore)
             .putInt("revivesLeft", revivesLeft)
+            .putInt("levelFails", levelFails)
             .apply()
         if (outOfTries) {
             state = State.RUN_OVER
@@ -593,11 +596,13 @@ class GameView(context: Context) : View(context) {
     /** Start a fresh run from level 1. */
     private fun newRun() {
         level = 1
-        triesLeft = triesPerLevel
+        triesLeft = strikesPerGame
         runScore = 0
         revivesLeft = revivesPerRun
+        levelFails = 0
         lastShape = null
         prefs.edit()
+            .putInt("levelFails", levelFails)
             .putInt("level", level)
             .putInt("triesLeft", triesLeft)
             .putInt("runScore", runScore)
@@ -606,7 +611,8 @@ class GameView(context: Context) : View(context) {
         newRound()
     }
 
-    private fun reviveAvailable() = revivesLeft > 0 && !cleared
+    // Revive is only offered when the game is over (third strike).
+    private fun reviveAvailable() = revivesLeft > 0 && outOfTries
 
     /** Placeholder for a real rewarded ad. */
     private fun startAd() {
@@ -785,7 +791,7 @@ class GameView(context: Context) : View(context) {
         cornerText.color = muted
         val inRound = state == State.PLAYING || state == State.OVER
         val live = runScore + if (inRound) score else 0
-        canvas.drawText("Run $live    Tries ${triesDots()}", dp(16f), dp(50f), cornerText)
+        canvas.drawText("Run $live    Strikes ${triesDots()}", dp(16f), dp(50f), cornerText)
 
         when (state) {
             State.READY -> drawReady(canvas)
@@ -811,7 +817,8 @@ class GameView(context: Context) : View(context) {
         if (safeButtonEnabled && state == State.READY) drawSafeButton(canvas)     // DEBUG
     }
 
-    private fun triesDots() = (1..triesPerLevel).joinToString(" ") { if (it <= triesLeft) "●" else "○" }
+    /** Strikes used show as ✕, strikes still available as ○. */
+    private fun triesDots() = (1..strikesPerGame).joinToString(" ") { if (it <= strikesPerGame - triesLeft) "✕" else "○" }
 
     /** Fills toward par, then keeps going. The full bar is a perfect run. */
     private fun drawProgress(canvas: Canvas, score: Int) {
@@ -905,14 +912,14 @@ class GameView(context: Context) : View(context) {
             }
             outOfTries -> {
                 midText.color = dangerColor
-                canvas.drawText("Out of tries!", cx, y, midText)
+                canvas.drawText("Strike $strikesPerGame — you're out!", cx, y, midText)
             }
             else -> {
                 smallText.color = warnColor
                 val pctOfPar = if (par > 0) lastScore * 100 / par else 0
                 val left = triesLeft - 1
-                val word = if (left == 1) "try" else "tries"
-                canvas.drawText("$pctOfPar% of par  ·  $left $word left", cx, y, smallText)
+                val word = if (left == 1) "strike" else "strikes"
+                canvas.drawText("Strike!  $pctOfPar% of par  ·  $left $word left", cx, y, smallText)
             }
         }
         y += dp(36f)
@@ -940,7 +947,7 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("GAME OVER", cx, y, bigText)
         y += dp(42f)
         smallText.color = muted
-        canvas.drawText("Out of tries on Level $playedLevel", cx, y, smallText)
+        canvas.drawText("Struck out on Level $playedLevel", cx, y, smallText)
         y += dp(60f)
         bigText.color = if (newBest) gold else accent
         canvas.drawText("$runScore", cx, y, bigText)
@@ -954,7 +961,7 @@ class GameView(context: Context) : View(context) {
         }
         y += dp(70f)
         smallText.color = Color.WHITE
-        canvas.drawText("Tap to start a new run", cx, y, smallText)
+        canvas.drawText("Tap to start a new game", cx, y, smallText)
     }
 
     // Placeholder for a real rewarded video ad (to be replaced with Google AdMob later).
