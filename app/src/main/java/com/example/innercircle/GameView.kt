@@ -81,6 +81,8 @@ class GameView(context: Context) : View(context) {
     private val roundsToEarnStrike = 5        // clear this many levels in a row without a strike to get one back
     private val fakeAdSeconds = 5             // length of the placeholder ad
     private val proWaitSeconds = 3            // Pro screen on exit: seconds before Exit / Not now appear
+    private val checkpointEvery = 10          // Pro: new games can start at level 11, 21, 31... once reached
+    private val longPressMs = 800L            // hold RESET this long to toggle Pro test mode
 
     // Space kept free at the bottom for a Google AdMob banner (a standard banner is 50dp tall).
     private val adBannerHeightDp = 60f
@@ -106,26 +108,26 @@ class GameView(context: Context) : View(context) {
     private val ovalB = 0.72f     // oval half-height
 
     // ================= COLORS =================
-    private val bgCenter = Color.rgb(28, 36, 72)
-    private val bgEdge = Color.rgb(8, 10, 22)
-    private val safeColor = Color.rgb(80, 220, 255)     // ring when you have room
-    private val warnColor = Color.rgb(255, 200, 60)     // ring when it's getting close
-    private val dangerColor = Color.rgb(255, 70, 100)   // ring when you're about to touch
-    private val innerSmall = Color.rgb(110, 255, 170)   // inner circle at starting size
-    private val innerBig = Color.rgb(200, 110, 255)     // inner circle once it's grown a lot
-    private val accent = Color.rgb(80, 220, 255)
+    private var bgCenter = Color.rgb(28, 36, 72)
+    private var bgEdge = Color.rgb(8, 10, 22)
+    private var safeColor = Color.rgb(80, 220, 255)     // ring when you have room
+    private var warnColor = Color.rgb(255, 200, 60)     // ring when it's getting close
+    private var dangerColor = Color.rgb(255, 70, 100)   // ring when you're about to touch
+    private var innerSmall = Color.rgb(110, 255, 170)   // inner circle at starting size
+    private var innerBig = Color.rgb(200, 110, 255)     // inner circle once it's grown a lot
+    private var accent = Color.rgb(80, 220, 255)
     private val gold = Color.rgb(255, 210, 80)
     private val muted = Color.rgb(160, 172, 200)
     // ==========================================
 
-    private enum class State { READY, PLAYING, OVER, AD, RUN_OVER, PRO }
+    private enum class State { READY, PLAYING, OVER, AD, RUN_OVER, PRO, PRACTICE_PICK, THEMES, STATS }
 
     private val prefs = context.getSharedPreferences("inner_circle", Context.MODE_PRIVATE)
     private val sound = SoundEngine()
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
     /** Bottom of the play area; below it is kept free for the ad banner. */
-    private val playBottom: Float get() = height - dp(adBannerHeightDp)
+    private val playBottom: Float get() = height - (if (isPro) 0f else dp(adBannerHeightDp))
     private val twoPi = (2.0 * PI).toFloat()
 
     private var state = State.READY
@@ -156,11 +158,58 @@ class GameView(context: Context) : View(context) {
     private var paused = false                // after a revive: waits for a touch before resuming
     private var adEndsAt = 0L
     private var pausedMsg = "Touch to continue"
+    // Pro. For now it's switched on by holding RESET (test mode); later Google Play Billing sets it.
+    private var isPro = prefs.getBoolean("pro", false)
+    private var maxLevel = prefs.getInt("maxLevel", prefs.getInt("level", 1))  // highest level ever reached
+    private var resetHeld = false
+    private val checkpointRects = Array(4) { RectF() }
+    private var checkpointLevels = emptyList<Int>()
+    private val toggleProRunnable = Runnable {
+        resetHeld = false
+        isPro = !isPro
+        prefs.edit().putBoolean("pro", isPro).apply()
+        applyTheme()
+        android.widget.Toast.makeText(context, if (isPro) "Pro test mode ON" else "Pro test mode OFF",
+            android.widget.Toast.LENGTH_SHORT).show()
+        invalidate()
+    }
     private var stateBeforePro = State.READY
     private var proShownAt = 0L
     private val proUpgradeRect = RectF()
     private val proStayRect = RectF()
     private val proExitRect = RectF()
+
+    // ---- Pro: practice, themes, stats ----
+    private var practice = false              // practice round: no strikes, nothing saved
+    private var practiceLevel = 1
+    private var pickLevel = 1
+    private var proFromMenu = false           // Pro screen opened from a menu button (not from Back)
+    private val menuRects = Array(3) { RectF() }
+    private val menuLabels = arrayOf("PRACTICE", "THEMES", "STATS")
+    private val endPracticeRect = RectF()
+    private val pickRects = Array(4) { RectF() }
+    private val pickDeltas = intArrayOf(-10, -1, 1, 10)
+    private val pickPlayRect = RectF()
+    private val backRect = RectF()
+    private val themeRects = Array(5) { RectF() }
+
+    private class Theme(
+        val name: String, val bgCenter: Int, val bgEdge: Int, val safe: Int, val warn: Int,
+        val danger: Int, val innerSmall: Int, val innerBig: Int, val accent: Int
+    )
+    private val themes = listOf(
+        Theme("Classic", Color.rgb(28, 36, 72), Color.rgb(8, 10, 22), Color.rgb(80, 220, 255), Color.rgb(255, 200, 60),
+            Color.rgb(255, 70, 100), Color.rgb(110, 255, 170), Color.rgb(200, 110, 255), Color.rgb(80, 220, 255)),
+        Theme("Neon", Color.rgb(40, 0, 60), Color.rgb(6, 0, 14), Color.rgb(0, 255, 200), Color.rgb(255, 235, 0),
+            Color.rgb(255, 0, 130), Color.rgb(255, 90, 230), Color.rgb(120, 90, 255), Color.rgb(0, 255, 200)),
+        Theme("Ocean", Color.rgb(10, 60, 95), Color.rgb(2, 14, 28), Color.rgb(130, 235, 255), Color.rgb(255, 215, 130),
+            Color.rgb(255, 105, 95), Color.rgb(255, 190, 140), Color.rgb(255, 95, 130), Color.rgb(130, 235, 255)),
+        Theme("Ember", Color.rgb(70, 22, 10), Color.rgb(16, 4, 2), Color.rgb(255, 185, 90), Color.rgb(255, 130, 40),
+            Color.rgb(255, 45, 45), Color.rgb(255, 240, 200), Color.rgb(255, 140, 40), Color.rgb(255, 195, 100)),
+        Theme("Mono", Color.rgb(44, 44, 50), Color.rgb(8, 8, 10), Color.rgb(235, 235, 235), Color.rgb(170, 170, 175),
+            Color.rgb(255, 85, 85), Color.rgb(255, 255, 255), Color.rgb(140, 140, 150), Color.rgb(235, 235, 235))
+    )
+    private var themeIndex = prefs.getInt("theme", 0)
 
     // Outer shape
     private var shape = Shape.CIRCLE
@@ -234,6 +283,10 @@ class GameView(context: Context) : View(context) {
         textAlign = Paint.Align.LEFT
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
     }
+    private val rightText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.RIGHT
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
     private val outerPath = Path()
 
     // Progress bar, revive button and fake ad
@@ -295,6 +348,7 @@ class GameView(context: Context) : View(context) {
         midText.textSize = dp(24f)
         smallText.textSize = dp(16f)
         cornerText.textSize = dp(14f)
+        rightText.textSize = dp(14f)
         resetText.textSize = dp(13f)
     }
 
@@ -330,6 +384,24 @@ class GameView(context: Context) : View(context) {
      * Returns false only when the app should actually close.
      */
     fun onBackRequested(): Boolean {
+        if (state == State.PRACTICE_PICK || state == State.THEMES || state == State.STATS) {
+            state = State.READY
+            invalidate()
+            return true
+        }
+        if (practice && (state == State.READY || state == State.OVER)) {
+            practice = false                    // Back ends practice and returns to your game
+            lastShape = null
+            newRound()
+            return true
+        }
+        if (state == State.PRO && proFromMenu) {
+            proFromMenu = false
+            state = stateBeforePro
+            invalidate()
+            return true
+        }
+        if (isPro && state != State.AD && state != State.PRO) return false   // Pro: no upsell, just exit
         if (state == State.AD) return true                      // can't skip the ad with Back
         if (state == State.PRO) {
             // Back is ignored during the short wait, then it exits like the Exit button.
@@ -337,6 +409,7 @@ class GameView(context: Context) : View(context) {
         }
         pauseRound("Paused: touch to continue")
         stateBeforePro = state
+        proFromMenu = false
         state = State.PRO
         proShownAt = System.currentTimeMillis()
         invalidate()
@@ -345,23 +418,40 @@ class GameView(context: Context) : View(context) {
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        bgPaint.shader = RadialGradient(
-            w / 2f, h / 2f, max(w, h) * 0.75f,
-            bgCenter, bgEdge, Shader.TileMode.CLAMP
-        )
+        applyTheme()
         resetRect.set(w - dp(96f), dp(14f), w - dp(12f), dp(50f)) // DEBUG
         safeRect.set(w - dp(96f), dp(58f), w - dp(12f), dp(94f))   // DEBUG
         newRound()
+    }
+
+    /** Pro themes recolor the whole game; without Pro it's always Classic. */
+    private fun applyTheme() {
+        val t = themes[if (isPro) themeIndex.coerceIn(0, themes.size - 1) else 0]
+        bgCenter = t.bgCenter
+        bgEdge = t.bgEdge
+        safeColor = t.safe
+        warnColor = t.warn
+        dangerColor = t.danger
+        innerSmall = t.innerSmall
+        innerBig = t.innerBig
+        accent = t.accent
+        if (width > 0) {
+            bgPaint.shader = RadialGradient(
+                width / 2f, height / 2f, max(width, height) * 0.75f,
+                bgCenter, bgEdge, Shader.TileMode.CLAMP
+            )
+        }
+        invalidate()
     }
 
     // ---------------- Shapes ----------------
 
     private fun pickShape(): Shape {
         val pool = mutableListOf(Shape.CIRCLE)
-        if (level >= ovalAtLevel) pool.add(Shape.OVAL)
-        if (level >= squareAtLevel) pool.add(Shape.SQUARE)
-        if (level >= triangleAtLevel) pool.add(Shape.TRIANGLE)
-        if (level >= starAtLevel) pool.add(Shape.STAR)
+        if (playedLevel >= ovalAtLevel) pool.add(Shape.OVAL)
+        if (playedLevel >= squareAtLevel) pool.add(Shape.SQUARE)
+        if (playedLevel >= triangleAtLevel) pool.add(Shape.TRIANGLE)
+        if (playedLevel >= starAtLevel) pool.add(Shape.STAR)
         val prev = lastShape
         if (pool.size > 1 && prev != null) pool.remove(prev)   // no same shape twice in a row
         return pool[Random.nextInt(pool.size)]
@@ -440,20 +530,20 @@ class GameView(context: Context) : View(context) {
         elapsed = 0f
 
         // Difficulty and score multiplier both grow with the level.
-        playedLevel = level
-        val g = level - 1
+        playedLevel = if (practice) practiceLevel else level
+        val g = playedLevel - 1
         shrinkSpeed = dp(min(maxShrinkDpPerSec, baseShrinkDpPerSec + shrinkIncreasePerLevel * g))
-        wobbleAmp = if (level >= wobbleStartsAtLevel) dp(min(maxWobbleDp, (level - wobbleStartsAtLevel + 1) * 1f)) else 0f
+        wobbleAmp = if (playedLevel >= wobbleStartsAtLevel) dp(min(maxWobbleDp, (playedLevel - wobbleStartsAtLevel + 1) * 1f)) else 0f
         levelMult = 1f + levelBonusPerLevel * g
-        levelBest = prefs.getInt("lvl_$level", 0)
+        levelBest = prefs.getInt("lvl_$playedLevel", 0)
 
         // Random shape, random starting angle, random spin direction.
         shape = pickShape()
         lastShape = shape
         buildVertices()
         shapeAngle = Random.nextFloat() * twoPi
-        shapeSpin = if (level >= spinAtLevel && shape != Shape.CIRCLE) {
-            val s = min(maxSpin, spinStart + spinPerLevel * (level - spinAtLevel))
+        shapeSpin = if (playedLevel >= spinAtLevel && shape != Shape.CIRCLE) {
+            val s = min(maxSpin, spinStart + spinPerLevel * (playedLevel - spinAtLevel))
             if (Random.nextBoolean()) s else -s
         } else 0f
         scoreMult = levelMult * shape.scoreMult
@@ -529,7 +619,7 @@ class GameView(context: Context) : View(context) {
             val creep = parCreepPerLevel * (playedLevel - parCreepStartsAtLevel + 1)
             parPercent = min(parPercentCap, parPercent + creep)
         }
-        mercy = max(mercyFloor, 1f - mercyPerFail * levelFails)
+        mercy = if (practice) 1f else max(mercyFloor, 1f - mercyPerFail * levelFails)
         par = max(1, (perfect * parPercent * mercy).toInt())
     }
 
@@ -612,11 +702,22 @@ class GameView(context: Context) : View(context) {
         if (!cleared) sound.fail()     // only after we know whether par was made
         outOfTries = !cleared && triesLeft <= 1
         earnsStrike = cleared && triesLeft < strikesPerGame && cleanStreak + 1 >= roundsToEarnStrike
+        if (practice) {
+            // Practice never costs a strike or touches your bests
+            outOfTries = false
+            earnsStrike = false
+            newHighScore = false
+            newLevelBest = false
+        }
         overAtMs = System.currentTimeMillis()
     }
 
     /** The player moved on without reviving: lock in the round's result. */
     private fun commitRound() {
+        if (practice) {
+            newRound()          // just play the same practice level again
+            return
+        }
         val ed = prefs.edit()
         if (newLevelBest) {
             levelBest = lastScore
@@ -625,6 +726,10 @@ class GameView(context: Context) : View(context) {
         runScore += lastScore
         if (cleared) {
             level = playedLevel + 1
+            if (level > maxLevel) {
+                maxLevel = level
+                ed.putInt("maxLevel", maxLevel)
+            }
             levelFails = 0
             cleanStreak += 1
             if (cleanStreak >= roundsToEarnStrike) {
@@ -644,6 +749,27 @@ class GameView(context: Context) : View(context) {
             }
             ed.putInt("best", best).putInt("bestLevel", bestLevel)
         }
+        // Stats (Pro screen shows them)
+        statInc(ed, "st_rounds")
+        statInc(ed, "st_pctSum", if (par > 0) min(300, lastScore * 100 / par) else 0)
+        statInc(ed, "st_time", elapsed.toInt())
+        statInc(ed, "st_rounds_${shape.name}")
+        if (cleared) {
+            statInc(ed, "st_cleared")
+            val run = prefs.getInt("st_curRun", 0) + 1
+            ed.putInt("st_curRun", run)
+            if (run > prefs.getInt("st_bestRun", 0)) ed.putInt("st_bestRun", run)
+        } else {
+            statInc(ed, "st_strikes")
+            statInc(ed, "st_miss_${shape.name}")
+            ed.putInt("st_curRun", 0)
+        }
+        if (outOfTries) {
+            statInc(ed, "st_games")
+            val hist = historyList() + runScore
+            ed.putString("st_history", hist.takeLast(20).joinToString(","))
+        }
+
         ed.putInt("level", level)
             .putInt("triesLeft", triesLeft)
             .putInt("runScore", runScore)
@@ -661,8 +787,8 @@ class GameView(context: Context) : View(context) {
     }
 
     /** Start a fresh run from level 1. */
-    private fun newRun() {
-        level = 1
+    private fun newRun(startLevel: Int = 1) {
+        level = startLevel
         triesLeft = strikesPerGame
         runScore = 0
         revivesLeft = revivesPerRun
@@ -710,7 +836,8 @@ class GameView(context: Context) : View(context) {
 
     // DEBUG: wipes all saved progress and scores — remove before release
     private fun resetAll() {
-        prefs.edit().clear().apply()
+        prefs.edit().clear().putBoolean("pro", isPro).apply()   // keep the Pro switch through a reset
+        maxLevel = 1
         best = 0
         bestLevel = 0
         lastScore = 0
@@ -861,10 +988,15 @@ class GameView(context: Context) : View(context) {
         cornerText.color = muted
         val inRound = state == State.PLAYING || state == State.OVER
         val live = runScore + if (inRound) score else 0
-        canvas.drawText("Run $live    Strikes ${triesDots()}", dp(16f), dp(50f), cornerText)
-        if (triesLeft < strikesPerGame) {
-            // Progress toward earning a strike back
-            canvas.drawText("Streak $cleanStreak/$roundsToEarnStrike", dp(16f), dp(70f), cornerText)
+        if (practice) {
+            cornerText.color = accent
+            canvas.drawText("PRACTICE  ·  scores don't count", dp(16f), dp(50f), cornerText)
+        } else {
+            canvas.drawText("Run $live    Strikes ${triesDots()}", dp(16f), dp(50f), cornerText)
+            if (triesLeft < strikesPerGame) {
+                // Progress toward earning a strike back
+                canvas.drawText("Streak $cleanStreak/$roundsToEarnStrike", dp(16f), dp(70f), cornerText)
+            }
         }
 
         when (state) {
@@ -886,11 +1018,19 @@ class GameView(context: Context) : View(context) {
             State.AD -> drawAd(canvas)
             State.RUN_OVER -> drawRunOver(canvas)
             State.PRO -> drawPro(canvas)
+            State.PRACTICE_PICK -> drawPracticePick(canvas)
+            State.THEMES -> drawThemes(canvas)
+            State.STATS -> drawStats(canvas)
         }
 
-        if (state != State.PLAYING && state != State.AD && state != State.PRO) drawResetButton(canvas)
+        if (state != State.PLAYING && !isFullScreen()) drawResetButton(canvas)
+        if (isPro && !isFullScreen()) {
+            tinyText.color = gold
+            canvas.drawText("★ PRO", resetRect.left - dp(26f), resetRect.centerY() + dp(4f), tinyText)
+        }
+        if (state == State.READY) drawMenu(canvas)
         if (safeButtonEnabled && state == State.READY) drawSafeButton(canvas)     // DEBUG
-        if (showAdPlaceholder && state != State.AD && state != State.PRO) drawAdPlaceholder(canvas)    // DEBUG
+        if (showAdPlaceholder && !isPro && !isFullScreen()) drawAdPlaceholder(canvas)    // DEBUG
     }
 
     /** Strikes used show as ✕, strikes still available as ○. */
@@ -977,7 +1117,12 @@ class GameView(context: Context) : View(context) {
         val prevLabel = if (newLevelBest) "Previous level best" else "Level best"
         canvas.drawText("$prevLabel $levelBest", cx, y, smallText)
         y += dp(34f)
-        when {
+        if (practice) {
+            val pctOfPar = if (par > 0) lastScore * 100 / par else 0
+            smallText.color = if (cleared) innerSmall else warnColor
+            val msg = if (cleared) "Made par! ($pctOfPar%)  ·  Practice" else "$pctOfPar% of par  ·  Practice, no strike"
+            canvas.drawText(msg, cx, y, smallText)
+        } else when {
             cleared -> {
                 smallText.color = innerSmall
                 canvas.drawText("Level cleared! On to Level ${playedLevel + 1}", cx, y, smallText)
@@ -1016,7 +1161,7 @@ class GameView(context: Context) : View(context) {
             canvas.drawRoundRect(reviveRect, dp(26f), dp(26f), reviveFill)
             val ty = reviveRect.centerY() - (reviveText.descent() + reviveText.ascent()) / 2f
             reviveText.color = Color.rgb(40, 25, 0)
-            canvas.drawText("▶  Watch ad to revive", cx, ty, reviveText)
+            canvas.drawText(if (isPro) "▶  Revive (Pro)" else "▶  Watch ad to revive", cx, ty, reviveText)
             y += dp(84f)
             smallText.color = Color.WHITE
             canvas.drawText("Tap anywhere else to continue", cx, y, smallText)
@@ -1049,8 +1194,39 @@ class GameView(context: Context) : View(context) {
             canvas.drawText("High score $best  ·  Level $bestLevel", cx, y, smallText)
         }
         y += dp(70f)
-        smallText.color = Color.WHITE
-        canvas.drawText("Tap to start a new game", cx, y, smallText)
+        checkpointLevels = checkpoints()
+        if (checkpointLevels.size > 1) {
+            // Pro: choose where the new game starts
+            smallText.color = Color.WHITE
+            canvas.drawText("Start new game at:", cx, y, smallText)
+            y += dp(18f)
+            val n = checkpointLevels.size
+            val gap = dp(10f)
+            val bw = min(dp(110f), (width - dp(32f) - gap * (n - 1)) / n)
+            var x = cx - (bw * n + gap * (n - 1)) / 2f
+            for (i in 0 until n) {
+                checkpointRects[i].set(x, y, x + bw, y + dp(46f))
+                drawProButton(canvas, checkpointRects[i], "Lv ${checkpointLevels[i]}",
+                    if (i == 0) Color.argb(90, 255, 255, 255) else gold,
+                    if (i == 0) Color.WHITE else Color.rgb(40, 25, 0))
+                x += bw + gap
+            }
+        } else {
+            smallText.color = Color.WHITE
+            canvas.drawText("Tap to start a new game", cx, y, smallText)
+        }
+    }
+
+    /** Pro checkpoints: level 1 plus the three highest of 11, 21, 31... that you've reached. */
+    private fun checkpoints(): List<Int> {
+        if (!isPro) return listOf(1)
+        val reached = mutableListOf<Int>()
+        var c = checkpointEvery + 1
+        while (c <= maxLevel) {
+            reached.add(c)
+            c += checkpointEvery
+        }
+        return listOf(1) + reached.takeLast(3)
     }
 
     // Placeholder for a real rewarded video ad (to be replaced with Google AdMob later).
@@ -1140,10 +1316,16 @@ class GameView(context: Context) : View(context) {
             canvas.drawText("Exit in ${(waitLeft + 999) / 1000}…", cx, y + dp(28f), smallText)
             postInvalidateOnAnimation()
         } else {
-            proStayRect.set(cx - dp(150f), y, cx - dp(10f), y + dp(48f))
-            proExitRect.set(cx + dp(10f), y, cx + dp(150f), y + dp(48f))
-            drawProButton(canvas, proStayRect, "Keep playing", innerSmall, Color.rgb(10, 40, 25))
-            drawProButton(canvas, proExitRect, "Exit", Color.argb(90, 255, 255, 255), Color.WHITE)
+            if (proFromMenu) {
+                proStayRect.set(cx - dp(90f), y, cx + dp(90f), y + dp(48f))
+                proExitRect.setEmpty()
+                drawProButton(canvas, proStayRect, "Not now", Color.argb(90, 255, 255, 255), Color.WHITE)
+            } else {
+                proStayRect.set(cx - dp(150f), y, cx - dp(10f), y + dp(48f))
+                proExitRect.set(cx + dp(10f), y, cx + dp(150f), y + dp(48f))
+                drawProButton(canvas, proStayRect, "Keep playing", innerSmall, Color.rgb(10, 40, 25))
+                drawProButton(canvas, proExitRect, "Exit", Color.argb(90, 255, 255, 255), Color.WHITE)
+            }
         }
     }
 
@@ -1153,10 +1335,274 @@ class GameView(context: Context) : View(context) {
                 // Placeholder until Google Play Billing is added
                 android.widget.Toast.makeText(context, "Pro is coming soon!", android.widget.Toast.LENGTH_SHORT).show()
             proStayRect.contains(x, y) -> {
+                proFromMenu = false
                 state = stateBeforePro
                 invalidate()
             }
             proExitRect.contains(x, y) -> (context as? android.app.Activity)?.finish()
+        }
+    }
+
+    // ---------------- Pro menu: practice, themes, stats ----------------
+
+    private fun isFullScreen() = state == State.AD || state == State.PRO ||
+        state == State.PRACTICE_PICK || state == State.THEMES || state == State.STATS
+
+    private fun drawSmallButton(canvas: Canvas, r: RectF, label: String, fill: Int) {
+        barFill.color = fill
+        canvas.drawRoundRect(r, dp(10f), dp(10f), barFill)
+        val ty = r.centerY() - (resetText.descent() + resetText.ascent()) / 2f
+        canvas.drawText(label, r.centerX(), ty, resetText)
+    }
+
+    /** Row of menu buttons at the bottom of the ready screen. */
+    private fun drawMenu(canvas: Canvas) {
+        val fill = Color.argb(200, 40, 60, 110)
+        val top = playBottom - dp(44f)
+        val cx = width / 2f
+        if (practice) {
+            endPracticeRect.set(cx - dp(80f), top, cx + dp(80f), top + dp(32f))
+            drawSmallButton(canvas, endPracticeRect, "END PRACTICE", fill)
+            return
+        }
+        val bw = dp(100f)
+        val gap = dp(10f)
+        var x = cx - (bw * 3 + gap * 2) / 2f
+        for (i in 0 until 3) {
+            menuRects[i].set(x, top, x + bw, top + dp(32f))
+            drawSmallButton(canvas, menuRects[i], if (isPro) menuLabels[i] else "★ " + menuLabels[i], fill)
+            x += bw + gap
+        }
+    }
+
+    private fun openMenu(i: Int) {
+        if (!isPro) {
+            // Not Pro yet: show what Pro includes
+            proFromMenu = true
+            stateBeforePro = state
+            state = State.PRO
+            proShownAt = 0L               // no wait when the player opened it on purpose
+        } else {
+            state = when (i) {
+                0 -> {
+                    pickLevel = level.coerceIn(1, max(1, maxLevel))
+                    State.PRACTICE_PICK
+                }
+                1 -> State.THEMES
+                else -> State.STATS
+            }
+        }
+        invalidate()
+    }
+
+    /** Dark backdrop, a gold title and a Back button; returns the title's baseline. */
+    private fun drawScreenBase(canvas: Canvas, title: String): Float {
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), overlayPaint)
+        val y = height * 0.12f
+        bigText.color = gold
+        canvas.drawText(title, width / 2f, y, bigText)
+        backRect.set(width / 2f - dp(90f), height - dp(84f), width / 2f + dp(90f), height - dp(38f))
+        drawProButton(canvas, backRect, "Back", Color.argb(90, 255, 255, 255), Color.WHITE)
+        return y
+    }
+
+    private fun shapesAt(lv: Int): String {
+        val l = mutableListOf("Circle")
+        if (lv >= ovalAtLevel) l.add("Oval")
+        if (lv >= squareAtLevel) l.add("Square")
+        if (lv >= triangleAtLevel) l.add("Triangle")
+        if (lv >= starAtLevel) l.add("Star")
+        return l.joinToString(", ")
+    }
+
+    // ---- Practice ----
+
+    private fun drawPracticePick(canvas: Canvas) {
+        var y = drawScreenBase(canvas, "PRACTICE")
+        val cx = width / 2f
+        y += dp(34f)
+        smallText.color = muted
+        canvas.drawText("No strikes. Scores don't count.", cx, y, smallText)
+        y += dp(70f)
+        smallText.color = Color.WHITE
+        canvas.drawText("Level", cx, y, smallText)
+        y += dp(48f)
+        bigText.color = Color.WHITE
+        canvas.drawText("$pickLevel", cx, y, bigText)
+        y += dp(30f)
+        smallText.color = muted
+        canvas.drawText(shapesAt(pickLevel), cx, y, smallText)
+        y += dp(28f)
+        val bw = dp(64f)
+        val gap = dp(10f)
+        var x = cx - (bw * 4 + gap * 3) / 2f
+        for (i in 0 until 4) {
+            pickRects[i].set(x, y, x + bw, y + dp(48f))
+            val d = pickDeltas[i]
+            drawProButton(canvas, pickRects[i], if (d > 0) "+$d" else "$d", Color.argb(200, 40, 60, 110), Color.WHITE)
+            x += bw + gap
+        }
+        y += dp(76f)
+        pickPlayRect.set(cx - dp(120f), y, cx + dp(120f), y + dp(56f))
+        drawProButton(canvas, pickPlayRect, "Play Level $pickLevel", gold, Color.rgb(40, 25, 0))
+        smallText.color = muted
+        canvas.drawText("Reached so far: Level ${max(1, maxLevel)}", cx, pickPlayRect.bottom + dp(34f), smallText)
+    }
+
+    private fun handlePickTouch(x: Float, y: Float) {
+        for (i in 0 until 4) {
+            if (pickRects[i].contains(x, y)) {
+                pickLevel = (pickLevel + pickDeltas[i]).coerceIn(1, max(1, maxLevel))
+                invalidate()
+                return
+            }
+        }
+        when {
+            pickPlayRect.contains(x, y) -> {
+                practice = true
+                practiceLevel = pickLevel
+                lastShape = null
+                newRound()
+            }
+            backRect.contains(x, y) -> {
+                state = State.READY
+                invalidate()
+            }
+        }
+    }
+
+    // ---- Themes ----
+
+    private fun drawThemes(canvas: Canvas) {
+        var y = drawScreenBase(canvas, "THEMES") + dp(30f)
+        val cx = width / 2f
+        for (i in themes.indices) {
+            val t = themes[i]
+            val r = themeRects[i]
+            r.set(cx - dp(140f), y, cx + dp(140f), y + dp(60f))
+            barFill.color = t.bgCenter
+            canvas.drawRoundRect(r, dp(14f), dp(14f), barFill)
+            // Mini preview: the ring and the inner circle in this theme's colors
+            ringPaint.color = t.safe
+            canvas.drawCircle(r.left + dp(34f), r.centerY(), dp(20f), ringPaint)
+            innerPaint.shader = null
+            innerPaint.color = t.innerSmall
+            canvas.drawCircle(r.left + dp(30f), r.centerY() + dp(4f), dp(8f), innerPaint)
+            cornerText.color = Color.WHITE
+            canvas.drawText(t.name, r.left + dp(70f), r.centerY() + dp(5f), cornerText)
+            if (i == themeIndex) {
+                rightText.color = gold
+                canvas.drawText("✓ In use", r.right - dp(16f), r.centerY() + dp(5f), rightText)
+            }
+            y += dp(70f)
+        }
+    }
+
+    private fun handleThemeTouch(x: Float, y: Float) {
+        for (i in themes.indices) {
+            if (themeRects[i].contains(x, y)) {
+                themeIndex = i
+                prefs.edit().putInt("theme", i).apply()
+                applyTheme()
+                return
+            }
+        }
+        if (backRect.contains(x, y)) {
+            state = State.READY
+            invalidate()
+        }
+    }
+
+    // ---- Stats ----
+
+    private fun statInc(ed: android.content.SharedPreferences.Editor, key: String, by: Int = 1) {
+        ed.putInt(key, prefs.getInt(key, 0) + by)
+    }
+
+    private fun historyList(): List<Int> =
+        (prefs.getString("st_history", "") ?: "").split(",").mapNotNull { it.toIntOrNull() }
+
+    private fun formatTime(sec: Int): String {
+        val h = sec / 3600
+        val m = (sec % 3600) / 60
+        return if (h > 0) "${h}h ${m}m" else "${m}m ${sec % 60}s"
+    }
+
+    private fun drawStats(canvas: Canvas) {
+        var y = drawScreenBase(canvas, "STATS") + dp(34f)
+        val left = dp(28f)
+        val right = width - dp(28f)
+        val rounds = prefs.getInt("st_rounds", 0)
+        val rows = listOf(
+            "Games played" to "${prefs.getInt("st_games", 0)}",
+            "Rounds played" to "$rounds",
+            "Levels cleared" to "${prefs.getInt("st_cleared", 0)}",
+            "Highest level reached" to "${max(1, maxLevel)}",
+            "Average score vs par" to (if (rounds > 0) "${prefs.getInt("st_pctSum", 0) / rounds}%" else "—"),
+            "Longest clear streak" to "${prefs.getInt("st_bestRun", 0)}",
+            "Time played" to formatTime(prefs.getInt("st_time", 0))
+        )
+        for ((k, v) in rows) {
+            cornerText.color = muted
+            canvas.drawText(k, left, y, cornerText)
+            rightText.color = Color.WHITE
+            canvas.drawText(v, right, y, rightText)
+            y += dp(24f)
+        }
+
+        // Score history: one bar per finished game, oldest on the left
+        y += dp(16f)
+        val hist = historyList()
+        cornerText.color = Color.WHITE
+        canvas.drawText(if (hist.isEmpty()) "Game scores" else "Last ${hist.size} game scores", left, y, cornerText)
+        y += dp(14f)
+        val chartH = dp(70f)
+        val base = y + chartH
+        if (hist.isEmpty()) {
+            smallText.color = muted
+            canvas.drawText("Finish a game to start your history", width / 2f, y + chartH / 2f, smallText)
+        } else {
+            val maxV = max(1, hist.maxOrNull() ?: 1)
+            val slot = (right - left) / 20f
+            val barW = slot - dp(2f)                  // 2dp gap between bars
+            val r = min(dp(3f), barW / 2f)
+            val bestIdx = hist.indexOf(maxV)
+            barFill.color = accent
+            for ((i, v) in hist.withIndex()) {
+                val h = max(dp(2f), chartH * v / maxV)
+                val x = left + i * slot
+                barRect.set(x, base - h, x + barW, base)
+                canvas.drawRoundRect(barRect, r, r, barFill)
+                canvas.drawRect(x, base - min(h, r), x + barW, base, barFill)   // square bottom on the baseline
+            }
+            // Label only the best game
+            tinyText.color = Color.WHITE
+            canvas.drawText("$maxV", left + bestIdx * slot + barW / 2f, base - chartH - dp(4f), tinyText)
+            tickPaint.color = Color.argb(80, 255, 255, 255)
+            canvas.drawLine(left, base, right, base, tickPaint)
+        }
+        y = base + dp(32f)
+
+        // Which shapes cost the most strikes
+        cornerText.color = Color.WHITE
+        canvas.drawText("Missed par, by shape", left, y, cornerText)
+        y += dp(24f)
+        var any = false
+        for (sh in Shape.values()) {
+            val n = prefs.getInt("st_rounds_${sh.name}", 0)
+            if (n == 0) continue
+            any = true
+            val miss = prefs.getInt("st_miss_${sh.name}", 0)
+            cornerText.color = muted
+            canvas.drawText(sh.label, left, y, cornerText)
+            rightText.color = Color.WHITE
+            canvas.drawText("${miss * 100 / n}%  of $n", right, y, rightText)
+            y += dp(22f)
+        }
+        if (!any) {
+            cornerText.color = muted
+            canvas.drawText("No rounds yet", left, y, cornerText)
         }
     }
 
@@ -1214,9 +1660,11 @@ class GameView(context: Context) : View(context) {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 // DEBUG: reset button, only when not mid-game
-                if (state != State.PLAYING && state != State.AD && state != State.PRO &&
+                if (state != State.PLAYING && !isFullScreen() &&
                     resetRect.contains(e.x, e.y)) {
-                    confirmReset()
+                    // Tap = reset (with confirmation). Hold = toggle Pro test mode.
+                    resetHeld = true
+                    postDelayed(toggleProRunnable, longPressMs)
                     return true
                 }
                 // DEBUG: safe spot button toggles the overlay without starting the game
@@ -1228,8 +1676,19 @@ class GameView(context: Context) : View(context) {
                 }
                 when (state) {
                     State.READY -> {
-                        startGame()
-                        track(e, 0)
+                        val m = menuRects.indexOfFirst { it.contains(e.x, e.y) }
+                        when {
+                            practice && endPracticeRect.contains(e.x, e.y) -> {
+                                practice = false
+                                lastShape = null
+                                newRound()
+                            }
+                            !practice && m >= 0 -> openMenu(m)
+                            else -> {
+                                startGame()
+                                track(e, 0)
+                            }
+                        }
                     }
                     State.PLAYING -> {
                         if (paused) {
@@ -1241,12 +1700,29 @@ class GameView(context: Context) : View(context) {
                         track(e, 0)
                     }
                     State.OVER -> {
-                        if (reviveAvailable() && reviveRect.contains(e.x, e.y)) startAd()
+                        if (reviveAvailable() && reviveRect.contains(e.x, e.y)) {
+                            if (isPro) revive() else startAd()
+                        }
                         else if (System.currentTimeMillis() - overAtMs > 700) commitRound()
                     }
                     State.AD -> if (System.currentTimeMillis() >= adEndsAt) revive()
-                    State.RUN_OVER -> if (System.currentTimeMillis() - overAtMs > 700) newRun()
+                    State.RUN_OVER -> if (System.currentTimeMillis() - overAtMs > 700) {
+                        if (checkpointLevels.size > 1) {
+                            val i = checkpointRects.indices.firstOrNull {
+                                it < checkpointLevels.size && checkpointRects[it].contains(e.x, e.y)
+                            }
+                            if (i != null) newRun(checkpointLevels[i])
+                        } else {
+                            newRun()
+                        }
+                    }
                     State.PRO -> handleProTouch(e.x, e.y)
+                    State.PRACTICE_PICK -> handlePickTouch(e.x, e.y)
+                    State.THEMES -> handleThemeTouch(e.x, e.y)
+                    State.STATS -> if (backRect.contains(e.x, e.y)) {
+                        state = State.READY
+                        invalidate()
+                    }
                 }
             }
             MotionEvent.ACTION_MOVE -> if (fingerDown && state == State.PLAYING) {
@@ -1273,7 +1749,15 @@ class GameView(context: Context) : View(context) {
                 }
             }
             // Lifting your last finger lets the ring speed up.
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> fingerDown = false
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                fingerDown = false
+                if (resetHeld) {
+                    // Let go before the long press fired: it was a tap
+                    resetHeld = false
+                    removeCallbacks(toggleProRunnable)
+                    if (e.actionMasked == MotionEvent.ACTION_UP) confirmReset()
+                }
+            }
         }
         return true
     }
