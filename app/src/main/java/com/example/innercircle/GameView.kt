@@ -29,7 +29,7 @@ class GameView(context: Context) : View(context) {
     // ================= TUNING =================
     // All sizes are in dp so the game feels the same on every phone.
     private val innerStartRadiusDp = 22f      // starting size of the filled circle
-    private val outerStartFraction = 0.42f    // ring size as a fraction of the screen's short side
+    private val outerStartFraction = 0.40f    // ring size as a fraction of the screen's short side
     private val growthPerDistance = 0.04f     // inner radius gained per unit of distance dragged
     private val baseShrinkDpPerSec = 8f       // ring shrink speed while touching, level 1
     private val shrinkIncreasePerLevel = 0.6f // extra shrink speed for each level
@@ -86,6 +86,7 @@ class GameView(context: Context) : View(context) {
 
     // Space kept free at the bottom for a Google AdMob banner (a standard banner is 50dp tall).
     private val adBannerHeightDp = 60f
+    private val hudHeightDp = 212f            // top area used by the timer, score and progress bar
     private val showAdPlaceholder = true      // DEBUG: outlines the banner space; set false to hide
 
     // Sound
@@ -521,7 +522,7 @@ class GameView(context: Context) : View(context) {
 
     private fun newRound() {
         baseCx = width / 2f
-        baseCy = height / 2f
+        baseCy = (dp(hudHeightDp) + playBottom) / 2f   // centered in the space between the top display and the bottom
         outerCx = baseCx
         outerCy = baseCy
         outerR = min(width, height) * outerStartFraction
@@ -676,6 +677,13 @@ class GameView(context: Context) : View(context) {
         targetX = baseCx + cos(a) * r
         targetY = baseCy + sin(a) * r
         retargetIn = 1.5f + Random.nextFloat() * 2.5f   // change course every 1.5–4 seconds
+        // Keep the whole shape on screen (pointed shapes reach 1.15x the ring size), and
+        // mostly clear of the top display. There's more room to roam as the ring shrinks.
+        val ext = outerR * 1.15f + wobbleAmp + dp(6f)
+        targetX = if (width - 2 * ext > 0) targetX.coerceIn(ext, width - ext) else width / 2f
+        val minY = dp(hudHeightDp) - dp(40f) + ext
+        val maxY = playBottom - ext
+        targetY = if (maxY > minY) targetY.coerceIn(minY, maxY) else baseCy
     }
 
     private fun startGame() {
@@ -967,7 +975,7 @@ class GameView(context: Context) : View(context) {
 
         // HUD
         val cx = width / 2f
-        val top = dp(80f)
+        val top = dp(104f)
         bigText.color = Color.WHITE
         canvas.drawText(String.format("%.2f", elapsed), cx, top, bigText)
         val score = currentScore()
@@ -976,9 +984,9 @@ class GameView(context: Context) : View(context) {
             score >= par -> innerSmall        // turns mint once you've reached par
             else -> accent
         }
-        canvas.drawText("$score", cx, top + dp(34f), midText)
+        canvas.drawText("$score", cx, top + dp(32f), midText)
         smallText.color = muted
-        canvas.drawText("Level $playedLevel  ·  Par $par  ·  Moved ${movedDp.toInt()}", cx, top + dp(60f), smallText)
+        canvas.drawText("Level $playedLevel  ·  Par $par  ·  Moved ${movedDp.toInt()}", cx, top + dp(56f), smallText)
         drawProgress(canvas, score)
 
         // High score with its level, and the running total, in the top-left corner
@@ -1040,7 +1048,7 @@ class GameView(context: Context) : View(context) {
     private fun drawProgress(canvas: Canvas, score: Int) {
         val left = dp(32f)
         val right = width - dp(32f)
-        val y = dp(166f)
+        val y = dp(182f)
         val h = dp(8f)
         val full = max(1, maxOf(perfect, score, par, levelBest)).toFloat()
         fun xOf(v: Int) = left + (right - left) * (v / full).coerceIn(0f, 1f)
@@ -1069,22 +1077,19 @@ class GameView(context: Context) : View(context) {
     }
 
     private fun drawReady(canvas: Canvas) {
+        // Kept short: the top display already shows the level and par.
         val cx = width / 2f
-        val y = playBottom - dp(60f)
-        smallText.color = muted
-        canvas.drawText("Touch anywhere and drag to move the circle", cx, y, smallText)
-
+        var y = playBottom - dp(58f)
         val mult = String.format("%.2f", scoreMult)
+        val bestText = if (levelBest > 0) "Best $levelBest" else "New level"
         smallText.color = Color.WHITE
-        canvas.drawText("Level $playedLevel  ·  ${shape.label}  ·  Score ×$mult", cx, y - dp(28f), smallText)
+        canvas.drawText("${shape.label}  ·  Score ×$mult  ·  $bestText", cx, y, smallText)
+        y -= dp(24f)
         smallText.color = innerSmall
         val pct = (parPercent * 100).toInt()
         val mercyText = if (mercy < 1f) "  (−${((1f - mercy) * 100).toInt()}% mercy)" else ""
-        canvas.drawText("Par $par = $pct% of perfect$mercyText", cx, y - dp(52f), smallText)
-        smallText.color = muted
-        val bestText = if (levelBest > 0) "Your best on this level: $levelBest" else "Level not played yet"
-        canvas.drawText(bestText, cx, y - dp(76f), smallText)
-
+        canvas.drawText("Par = $pct% of a perfect run$mercyText", cx, y, smallText)
+        y -= dp(24f)
         val note = when (playedLevel) {
             ovalAtLevel -> "New shape: ovals!"
             spinAtLevel -> "New: shapes now spin!"
@@ -1094,9 +1099,11 @@ class GameView(context: Context) : View(context) {
             wobbleStartsAtLevel -> "New: the ring wobbles!"
             else -> null
         }
-        if (note != null) {
-            smallText.color = warnColor
-            canvas.drawText(note, cx, y - dp(104f), smallText)
+        // How-to hint only on the first couple of levels
+        val hint = note ?: if (playedLevel <= 2 && !practice) "Touch anywhere and drag to move the circle" else null
+        if (hint != null) {
+            smallText.color = if (note != null) warnColor else muted
+            canvas.drawText(hint, cx, y, smallText)
         }
     }
 
