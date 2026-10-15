@@ -80,6 +80,7 @@ class GameView(context: Context) : View(context) {
     private val revivesPerRun = 1             // revives (after watching an ad) allowed per game
     private val roundsToEarnStrike = 5        // clear this many levels in a row without a strike to get one back
     private val fakeAdSeconds = 5             // length of the placeholder ad
+    private val proWaitSeconds = 3            // Pro screen on exit: seconds before Exit / Not now appear
 
     // Space kept free at the bottom for a Google AdMob banner (a standard banner is 50dp tall).
     private val adBannerHeightDp = 60f
@@ -117,7 +118,7 @@ class GameView(context: Context) : View(context) {
     private val muted = Color.rgb(160, 172, 200)
     // ==========================================
 
-    private enum class State { READY, PLAYING, OVER, AD, RUN_OVER }
+    private enum class State { READY, PLAYING, OVER, AD, RUN_OVER, PRO }
 
     private val prefs = context.getSharedPreferences("inner_circle", Context.MODE_PRIVATE)
     private val sound = SoundEngine()
@@ -154,6 +155,12 @@ class GameView(context: Context) : View(context) {
     private var outOfTries = false
     private var paused = false                // after a revive: waits for a touch before resuming
     private var adEndsAt = 0L
+    private var pausedMsg = "Touch to continue"
+    private var stateBeforePro = State.READY
+    private var proShownAt = 0L
+    private val proUpgradeRect = RectF()
+    private val proStayRect = RectF()
+    private val proExitRect = RectF()
 
     // Outer shape
     private var shape = Shape.CIRCLE
@@ -302,7 +309,39 @@ class GameView(context: Context) : View(context) {
     }
 
     fun resumeAudio() = sound.start()
-    fun pauseAudio() = sound.stop()
+    fun pauseAudio() {
+        pauseRound("Paused: touch to continue")
+        sound.stop()
+    }
+
+    /** Freeze a round in progress until the player touches the screen again. */
+    private fun pauseRound(msg: String) {
+        if (state == State.PLAYING && !paused) {
+            paused = true
+            pausedMsg = msg
+            fingerDown = false
+            sound.humVolume = 0f
+            invalidate()
+        }
+    }
+
+    /**
+     * Called by the activity when Back is pressed. Shows the Pro screen first.
+     * Returns false only when the app should actually close.
+     */
+    fun onBackRequested(): Boolean {
+        if (state == State.AD) return true                      // can't skip the ad with Back
+        if (state == State.PRO) {
+            // Back is ignored during the short wait, then it exits like the Exit button.
+            return System.currentTimeMillis() - proShownAt < proWaitSeconds * 1000L
+        }
+        pauseRound("Paused: touch to continue")
+        stateBeforePro = state
+        state = State.PRO
+        proShownAt = System.currentTimeMillis()
+        invalidate()
+        return true
+    }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -663,6 +702,7 @@ class GameView(context: Context) : View(context) {
         iy = outerCy
         state = State.PLAYING
         paused = true
+        pausedMsg = "Revived! Touch to continue"
         fingerDown = false
         lastFrameNs = 0L
         invalidate()
@@ -833,7 +873,7 @@ class GameView(context: Context) : View(context) {
             State.PLAYING -> {
                 if (paused) {
                     midText.color = innerSmall
-                    canvas.drawText("Revived! Touch to continue", cx, playBottom - dp(60f), midText)
+                    canvas.drawText(pausedMsg, cx, playBottom - dp(60f), midText)
                 } else {
                     if (!fingerDown) {
                         smallText.color = gold
@@ -845,11 +885,12 @@ class GameView(context: Context) : View(context) {
             }
             State.AD -> drawAd(canvas)
             State.RUN_OVER -> drawRunOver(canvas)
+            State.PRO -> drawPro(canvas)
         }
 
-        if (state != State.PLAYING && state != State.AD) drawResetButton(canvas) // DEBUG
+        if (state != State.PLAYING && state != State.AD && state != State.PRO) drawResetButton(canvas)
         if (safeButtonEnabled && state == State.READY) drawSafeButton(canvas)     // DEBUG
-        if (showAdPlaceholder && state != State.AD) drawAdPlaceholder(canvas)    // DEBUG
+        if (showAdPlaceholder && state != State.AD && state != State.PRO) drawAdPlaceholder(canvas)    // DEBUG
     }
 
     /** Strikes used show as ✕, strikes still available as ○. */
@@ -974,6 +1015,7 @@ class GameView(context: Context) : View(context) {
             reviveRect.set(cx - dp(130f), y, cx + dp(130f), y + dp(52f))
             canvas.drawRoundRect(reviveRect, dp(26f), dp(26f), reviveFill)
             val ty = reviveRect.centerY() - (reviveText.descent() + reviveText.ascent()) / 2f
+            reviveText.color = Color.rgb(40, 25, 0)
             canvas.drawText("▶  Watch ad to revive", cx, ty, reviveText)
             y += dp(84f)
             smallText.color = Color.WHITE
@@ -1038,6 +1080,86 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("RESET", resetRect.centerX(), ty, resetText)
     }
 
+    // ---------------- Reset confirmation ----------------
+
+    private fun confirmReset() {
+        android.app.AlertDialog.Builder(context)
+            .setTitle("Reset all scores?")
+            .setMessage("This erases your high score, every level best and the game in progress. It can't be undone.")
+            .setPositiveButton("Reset") { _, _ -> resetAll() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ---------------- Pro upsell (shown on Back) ----------------
+
+    private fun drawProButton(canvas: Canvas, r: RectF, label: String, fill: Int, textColor: Int) {
+        barFill.color = fill
+        canvas.drawRoundRect(r, r.height() / 2, r.height() / 2, barFill)
+        reviveText.color = textColor
+        val ty = r.centerY() - (reviveText.descent() + reviveText.ascent()) / 2f
+        canvas.drawText(label, r.centerX(), ty, reviveText)
+    }
+
+    private fun drawPro(canvas: Canvas) {
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), overlayPaint)
+        val cx = width / 2f
+        var y = height * 0.18f
+        bigText.color = gold
+        canvas.drawText("INNER CIRCLE", cx, y, bigText)
+        y += dp(40f)
+        midText.color = gold
+        canvas.drawText("★  P R O  ★", cx, y, midText)
+
+        y += dp(52f)
+        smallText.color = Color.WHITE
+        val perks = listOf(
+            "No ads, ever",
+            "Free revive every game (no video)",
+            "Practice any level you've reached",
+            "Start new games from your checkpoint",
+            "Exclusive ring & color themes",
+            "Detailed stats and score history"
+        )
+        for (p in perks) {
+            canvas.drawText("✓  $p", cx, y, smallText)
+            y += dp(30f)
+        }
+
+        y += dp(18f)
+        proUpgradeRect.set(cx - dp(140f), y, cx + dp(140f), y + dp(56f))
+        drawProButton(canvas, proUpgradeRect, "Upgrade to Pro", gold, Color.rgb(40, 25, 0))
+
+        y += dp(90f)
+        val waitLeft = proWaitSeconds * 1000L - (System.currentTimeMillis() - proShownAt)
+        if (waitLeft > 0) {
+            proStayRect.setEmpty()
+            proExitRect.setEmpty()
+            smallText.color = muted
+            canvas.drawText("Exit in ${(waitLeft + 999) / 1000}…", cx, y + dp(28f), smallText)
+            postInvalidateOnAnimation()
+        } else {
+            proStayRect.set(cx - dp(150f), y, cx - dp(10f), y + dp(48f))
+            proExitRect.set(cx + dp(10f), y, cx + dp(150f), y + dp(48f))
+            drawProButton(canvas, proStayRect, "Keep playing", innerSmall, Color.rgb(10, 40, 25))
+            drawProButton(canvas, proExitRect, "Exit", Color.argb(90, 255, 255, 255), Color.WHITE)
+        }
+    }
+
+    private fun handleProTouch(x: Float, y: Float) {
+        when {
+            proUpgradeRect.contains(x, y) ->
+                // Placeholder until Google Play Billing is added
+                android.widget.Toast.makeText(context, "Pro is coming soon!", android.widget.Toast.LENGTH_SHORT).show()
+            proStayRect.contains(x, y) -> {
+                state = stateBeforePro
+                invalidate()
+            }
+            proExitRect.contains(x, y) -> (context as? android.app.Activity)?.finish()
+        }
+    }
+
     // DEBUG: shows where the AdMob banner will go
     private fun drawAdPlaceholder(canvas: Canvas) {
         val top = playBottom + dp(5f)
@@ -1092,8 +1214,9 @@ class GameView(context: Context) : View(context) {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 // DEBUG: reset button, only when not mid-game
-                if (state != State.PLAYING && state != State.AD && resetRect.contains(e.x, e.y)) {
-                    resetAll()
+                if (state != State.PLAYING && state != State.AD && state != State.PRO &&
+                    resetRect.contains(e.x, e.y)) {
+                    confirmReset()
                     return true
                 }
                 // DEBUG: safe spot button toggles the overlay without starting the game
@@ -1123,6 +1246,7 @@ class GameView(context: Context) : View(context) {
                     }
                     State.AD -> if (System.currentTimeMillis() >= adEndsAt) revive()
                     State.RUN_OVER -> if (System.currentTimeMillis() - overAtMs > 700) newRun()
+                    State.PRO -> handleProTouch(e.x, e.y)
                 }
             }
             MotionEvent.ACTION_MOVE -> if (fingerDown && state == State.PLAYING) {

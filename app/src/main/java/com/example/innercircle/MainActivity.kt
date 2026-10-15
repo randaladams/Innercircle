@@ -23,4 +23,10 @@ class MainActivity : Activity() {
         game.pauseAudio()
         super.onPause()
     }
+
+    // Back shows the Pro screen first; the game tells us when it's OK to actually close.
+    @Suppress("DEPRECATION", "MissingSuperCall")
+    override fun onBackPressed() {
+        if (!game.onBackRequested()) finish()
+    }
 }
