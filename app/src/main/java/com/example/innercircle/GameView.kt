@@ -569,8 +569,8 @@ class GameView(context: Context) : View(context) {
         lastScore = currentScore()
         newLevelBest = lastScore > levelBest
         newHighScore = best > 0 && runScore + lastScore > best
-        if (!cleared) sound.fail()
         cleared = lastScore >= par
+        if (!cleared) sound.fail()     // only after we know whether par was made
         outOfTries = !cleared && triesLeft <= 1
         earnsStrike = cleared && triesLeft < strikesPerGame && cleanStreak + 1 >= roundsToEarnStrike
         overAtMs = System.currentTimeMillis()
