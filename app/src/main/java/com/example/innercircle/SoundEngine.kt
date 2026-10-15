@@ -27,14 +27,17 @@ class SoundEngine {
 
     // ---- One-shot volumes ----
     var crashVolume = 0.22           // peak loudness of the crash (the hum plays at about 0.35)
+    var failVolume = 0.22            // peak loudness of the missed-par sound
 
     @Volatile private var clickPending = false
     @Volatile private var crashPending = false
+    @Volatile private var failPending = false
     @Volatile private var running = false
     private var thread: Thread? = null
 
     fun click() { clickPending = true }
     fun crash() { crashPending = true }
+    fun fail() { failPending = true }     // missed par: sad "wah-wah-waaah"
 
     fun start() {
         if (running) return
@@ -49,6 +52,14 @@ class SoundEngine {
         running = false
         try { thread?.join(500) } catch (ignored: InterruptedException) { }
         thread = null
+    }
+
+    /** Quick fade-in, then a gentle fade-out over the note's length. */
+    private fun noteEnv(t: Double, len: Double): Double {
+        if (t < 0 || t > len) return 0.0
+        val attack = min(1.0, t / 0.015)
+        val release = min(1.0, (len - t) / 0.06)
+        return attack * release * (1.0 - 0.35 * t / len)
     }
 
     private fun loop() {
@@ -93,10 +104,15 @@ class SoundEngine {
         var clickPos = -1
         var crashPos = -1
         var popLp = 0.0
+        var failPos = Int.MIN_VALUE
+        var failPhase = 0.0
+        val failDelay = (sampleRate * 0.45).toInt()   // starts just after the crash
+        val failLen = (sampleRate * 1.6).toInt()
         var glidePhase = 0.0
 
         while (running) {
             if (clickPending) { clickPending = false; clickPos = 0 }
+            if (failPending) { failPending = false; failPos = -failDelay; failPhase = 0.0 }
             if (crashPending) { crashPending = false; crashPos = 0; popLp = 0.0; glidePhase = 0.0 }
 
             val targetF = humFreq.toDouble()
@@ -148,6 +164,32 @@ class SoundEngine {
                     s += crashVolume * (0.8 * pop + glide)
                     crashPos++
                 } else crashPos = -1
+
+                // ---- Missed par: three falling notes, the last one sagging with a wobble ----
+                if (failPos != Int.MIN_VALUE) {
+                    if (failPos >= 0 && failPos < failLen) {
+                        val t = failPos.toDouble() / sampleRate
+                        var f = 0.0
+                        var env = 0.0
+                        when {
+                            t < 0.26 -> { f = 311.0; env = noteEnv(t, 0.26) }
+                            t < 0.52 -> { f = 294.0; env = noteEnv(t - 0.26, 0.26) }
+                            else -> {
+                                val u = t - 0.52
+                                f = (277.0 - 40.0 * min(1.0, u / 0.9)) * (1.0 + 0.025 * sin(twoPi * 6.0 * u))
+                                env = noteEnv(u, 1.05)
+                            }
+                        }
+                        failPhase += twoPi * f / sampleRate
+                        if (failPhase > twoPi) failPhase -= twoPi
+                        // Muted brass-like tone: a few odd and even harmonics
+                        val tone = (sin(failPhase) + 0.45 * sin(2 * failPhase) + 0.25 * sin(3 * failPhase) +
+                            0.12 * sin(4 * failPhase)) / 1.82
+                        s += failVolume * env * tone
+                    }
+                    failPos++
+                    if (failPos >= failLen) failPos = Int.MIN_VALUE
+                }
 
                 if (s > 1.0) s = 1.0 else if (s < -1.0) s = -1.0
                 buf[i] = (s * 30000).toInt().toShort()

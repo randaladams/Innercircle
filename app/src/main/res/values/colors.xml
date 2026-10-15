@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Icon background, matched to the dark space color in the artwork -->
+    <color name="ic_launcher_background">#10122E</color>
+</resources>

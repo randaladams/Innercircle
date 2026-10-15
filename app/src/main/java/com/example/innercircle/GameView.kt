@@ -81,6 +81,10 @@ class GameView(context: Context) : View(context) {
     private val roundsToEarnStrike = 5        // clear this many levels in a row without a strike to get one back
     private val fakeAdSeconds = 5             // length of the placeholder ad
 
+    // Space kept free at the bottom for a Google AdMob banner (a standard banner is 50dp tall).
+    private val adBannerHeightDp = 60f
+    private val showAdPlaceholder = true      // DEBUG: outlines the banner space; set false to hide
+
     // Sound
     private val humLowHz = 70f                // hum pitch when the ring is full size
     private val humHighHz = 150f              // hum pitch when the ring has fully closed
@@ -119,6 +123,8 @@ class GameView(context: Context) : View(context) {
     private val sound = SoundEngine()
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
+    /** Bottom of the play area; below it is kept free for the ad banner. */
+    private val playBottom: Float get() = height - dp(adBannerHeightDp)
     private val twoPi = (2.0 * PI).toFloat()
 
     private var state = State.READY
@@ -563,6 +569,7 @@ class GameView(context: Context) : View(context) {
         lastScore = currentScore()
         newLevelBest = lastScore > levelBest
         newHighScore = best > 0 && runScore + lastScore > best
+        if (!cleared) sound.fail()
         cleared = lastScore >= par
         outOfTries = !cleared && triesLeft <= 1
         earnsStrike = cleared && triesLeft < strikesPerGame && cleanStreak + 1 >= roundsToEarnStrike
@@ -826,12 +833,12 @@ class GameView(context: Context) : View(context) {
             State.PLAYING -> {
                 if (paused) {
                     midText.color = innerSmall
-                    canvas.drawText("Revived! Touch to continue", cx, height - dp(60f), midText)
+                    canvas.drawText("Revived! Touch to continue", cx, playBottom - dp(60f), midText)
                 } else {
                     if (!fingerDown) {
                         smallText.color = gold
                         val pm = String.format("%.0f", handsOffPointsMultiplier)
-                        canvas.drawText("HANDS OFF: points ×$pm   ·   touch to slow", cx, height - dp(60f), smallText)
+                        canvas.drawText("HANDS OFF: points ×$pm   ·   touch to slow", cx, playBottom - dp(60f), smallText)
                     }
                     postInvalidateOnAnimation()
                 }
@@ -842,6 +849,7 @@ class GameView(context: Context) : View(context) {
 
         if (state != State.PLAYING && state != State.AD) drawResetButton(canvas) // DEBUG
         if (safeButtonEnabled && state == State.READY) drawSafeButton(canvas)     // DEBUG
+        if (showAdPlaceholder && state != State.AD) drawAdPlaceholder(canvas)    // DEBUG
     }
 
     /** Strikes used show as ✕, strikes still available as ○. */
@@ -881,7 +889,7 @@ class GameView(context: Context) : View(context) {
 
     private fun drawReady(canvas: Canvas) {
         val cx = width / 2f
-        val y = height - dp(60f)
+        val y = playBottom - dp(60f)
         smallText.color = muted
         canvas.drawText("Touch anywhere and drag to move the circle", cx, y, smallText)
 
@@ -1030,6 +1038,17 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("RESET", resetRect.centerX(), ty, resetText)
     }
 
+    // DEBUG: shows where the AdMob banner will go
+    private fun drawAdPlaceholder(canvas: Canvas) {
+        val top = playBottom + dp(5f)
+        val bannerW = dp(320f)
+        val left = (width - bannerW) / 2f
+        barRect.set(left, top, left + bannerW, top + dp(50f))
+        canvas.drawRect(barRect, safePaint)
+        tinyText.color = muted
+        canvas.drawText("AD BANNER SPACE (320 × 50)", barRect.centerX(), barRect.centerY() + dp(4f), tinyText)
+    }
+
     // DEBUG: remove before release
     private fun drawSafeButton(canvas: Canvas) {
         canvas.drawRoundRect(safeRect, dp(8f), dp(8f), if (showSafe) safeFillOn else safeFill)
@@ -1049,9 +1068,9 @@ class GameView(context: Context) : View(context) {
             val fit = safeR / density
             canvas.drawText(
                 String.format("Safest spot: %.1f dp from center  ·  fits radius %.0f dp", off, fit),
-                width / 2f, height - dp(170f), safeText
+                width / 2f, playBottom - dp(170f), safeText
             )
-            canvas.drawText("Perfect score this round: $perfect", width / 2f, height - dp(150f), safeText)
+            canvas.drawText("Perfect score this round: $perfect", width / 2f, playBottom - dp(150f), safeText)
         } else if (state == State.PLAYING) {
             // During play: follow the ring's center (where the search says the safe spot is).
             canvas.drawLine(outerCx - arm, outerCy, outerCx + arm, outerCy, safePaint)
