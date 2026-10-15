@@ -86,7 +86,8 @@ class GameView(context: Context) : View(context) {
 
     // Space kept free at the bottom for a Google AdMob banner (a standard banner is 50dp tall).
     private val adBannerHeightDp = 60f
-    private val hudHeightDp = 212f            // top area used by the timer, score and progress bar
+    private val hudHeightDp = 186f            // top area used by the timer, score and progress bar
+    private val bottomReserveDp = 100f        // bottom room for the ready-screen text and menu buttons
     private val showAdPlaceholder = true      // DEBUG: outlines the banner space; set false to hide
 
     // Sound
@@ -284,6 +285,10 @@ class GameView(context: Context) : View(context) {
         textAlign = Paint.Align.LEFT
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
     }
+    private val rowText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
     private val rightText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.RIGHT
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
@@ -350,6 +355,7 @@ class GameView(context: Context) : View(context) {
         smallText.textSize = dp(16f)
         cornerText.textSize = dp(14f)
         rightText.textSize = dp(14f)
+        rowText.textSize = dp(34f)
         resetText.textSize = dp(13f)
     }
 
@@ -522,7 +528,8 @@ class GameView(context: Context) : View(context) {
 
     private fun newRound() {
         baseCx = width / 2f
-        baseCy = (dp(hudHeightDp) + playBottom) / 2f   // centered in the space between the top display and the bottom
+        // Centered in the free space between the top display and the bottom text/buttons
+        baseCy = (dp(hudHeightDp) + playBottom - dp(bottomReserveDp)) / 2f
         outerCx = baseCx
         outerCy = baseCy
         outerR = min(width, height) * outerStartFraction
@@ -975,23 +982,24 @@ class GameView(context: Context) : View(context) {
 
         // HUD
         val cx = width / 2f
-        val top = dp(104f)
-        bigText.color = Color.WHITE
-        canvas.drawText(String.format("%.2f", elapsed), cx, top, bigText)
+        // Timer (left) and score (right) share one line to save room
+        val top = dp(108f)
+        rowText.color = Color.WHITE
+        canvas.drawText(String.format("%.2f", elapsed), width * 0.30f, top, rowText)
         val score = currentScore()
-        midText.color = when {
+        rowText.color = when {
             state == State.PLAYING && !fingerDown -> gold
             score >= par -> innerSmall        // turns mint once you've reached par
             else -> accent
         }
-        canvas.drawText("$score", cx, top + dp(32f), midText)
+        canvas.drawText("$score", width * 0.70f, top, rowText)
         smallText.color = muted
-        canvas.drawText("Level $playedLevel  ·  Par $par  ·  Moved ${movedDp.toInt()}", cx, top + dp(56f), smallText)
+        canvas.drawText("Level $playedLevel  ·  Par $par  ·  Moved ${movedDp.toInt()}", cx, top + dp(26f), smallText)
         drawProgress(canvas, score)
 
         // High score with its level, and the running total, in the top-left corner
         cornerText.color = gold
-        val bestLine = if (best > 0) "High score $best  ·  Level $bestLevel" else "High score —"
+        val bestLine = if (best > 0) "High score $best  ·  Lv $bestLevel" else "High score —"
         canvas.drawText(bestLine, dp(16f), dp(30f), cornerText)
         cornerText.color = muted
         val inRound = state == State.PLAYING || state == State.OVER
@@ -1048,7 +1056,7 @@ class GameView(context: Context) : View(context) {
     private fun drawProgress(canvas: Canvas, score: Int) {
         val left = dp(32f)
         val right = width - dp(32f)
-        val y = dp(182f)
+        val y = dp(156f)
         val h = dp(8f)
         val full = max(1, maxOf(perfect, score, par, levelBest)).toFloat()
         fun xOf(v: Int) = left + (right - left) * (v / full).coerceIn(0f, 1f)
