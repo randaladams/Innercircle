@@ -369,8 +369,18 @@ class GameView(context: Context) : View(context) {
         super.onDetachedFromWindow()
     }
 
-    fun resumeAudio() = sound.start()
+    fun resumeAudio() {
+        if (state == State.PLAYING) clearPending()   // back to the same paused round: nothing to record
+        sound.start()
+    }
     fun pauseAudio() {
+        // Leaving mid-round: record the round as if it ended now. If the player comes back to it,
+        // resumeAudio() cancels this; if the app is closed, it's counted on the next launch.
+        if (state == State.PLAYING && !practice) {
+            val sc = currentScore()
+            val clr = sc >= par
+            savePending(sc, clr, !clr && triesLeft <= 1, sc > levelBest)
+        }
         pauseRound("Paused: touch to continue")
         sound.stop()
     }
@@ -429,6 +439,7 @@ class GameView(context: Context) : View(context) {
         resetRect.set(w - dp(96f), dp(14f), w - dp(12f), dp(50f)) // DEBUG
         safeRect.set(w - dp(96f), dp(58f), w - dp(12f), dp(94f))   // DEBUG
         newRound()
+        restorePending()    // a round that ended (or was abandoned) before the app closed still counts
     }
 
     /** Pro themes recolor the whole game; without Pro it's always Classic. */
@@ -724,6 +735,8 @@ class GameView(context: Context) : View(context) {
             newHighScore = false
             newLevelBest = false
         }
+        // Save the result right away, so closing the app can't undo it
+        savePending(lastScore, cleared, outOfTries, newLevelBest)
         overAtMs = System.currentTimeMillis()
     }
 
@@ -791,6 +804,7 @@ class GameView(context: Context) : View(context) {
             .putInt("revivesLeft", revivesLeft)
             .putInt("levelFails", levelFails)
             .putInt("cleanStreak", cleanStreak)
+            .putBoolean("pending", false)
             .apply()
         if (outOfTries) {
             state = State.RUN_OVER
@@ -799,6 +813,48 @@ class GameView(context: Context) : View(context) {
         } else {
             newRound()
         }
+    }
+
+    // ---- Results survive the app being closed ----
+
+    private fun savePending(score: Int, clr: Boolean, oot: Boolean, nlb: Boolean) {
+        if (practice) return
+        prefs.edit()
+            .putBoolean("pending", true)
+            .putInt("p_level", playedLevel)
+            .putInt("p_score", score)
+            .putBoolean("p_cleared", clr)
+            .putBoolean("p_out", oot)
+            .putBoolean("p_nlb", nlb)
+            .putString("p_shape", shape.name)
+            .putFloat("p_elapsed", elapsed)
+            .putInt("p_par", par)
+            .apply()
+    }
+
+    private fun clearPending() {
+        prefs.edit().putBoolean("pending", false).apply()
+    }
+
+    /** On launch: if the last round's result was never locked in, lock it in now. */
+    private fun restorePending() {
+        if (!prefs.getBoolean("pending", false)) return
+        practice = false
+        playedLevel = prefs.getInt("p_level", level)
+        lastScore = prefs.getInt("p_score", 0)
+        cleared = prefs.getBoolean("p_cleared", false)
+        outOfTries = prefs.getBoolean("p_out", false)
+        newLevelBest = prefs.getBoolean("p_nlb", false)
+        shape = try {
+            Shape.valueOf(prefs.getString("p_shape", "CIRCLE") ?: "CIRCLE")
+        } catch (e: IllegalArgumentException) {
+            Shape.CIRCLE
+        }
+        elapsed = prefs.getFloat("p_elapsed", 0f)
+        par = prefs.getInt("p_par", 0)
+        levelBest = prefs.getInt("lvl_$playedLevel", 0)
+        commitRound()                       // starts the next round, or shows GAME OVER
+        if (state == State.RUN_OVER) buildVertices()   // keep the shape drawable behind the overlay
     }
 
     /** Start a fresh run from level 1. */
@@ -833,6 +889,7 @@ class GameView(context: Context) : View(context) {
 
     /** Ad watched: put the round back in play with room to breathe. */
     private fun revive() {
+        clearPending()      // the crash is undone, so its saved result is too
         revivesLeft -= 1
         prefs.edit().putInt("revivesLeft", revivesLeft).apply()
         // Fresh-size circle in the middle of the ring, and grow the ring back if it's too tight.
