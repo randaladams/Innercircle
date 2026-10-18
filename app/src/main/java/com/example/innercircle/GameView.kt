@@ -376,13 +376,17 @@ class GameView(context: Context) : View(context) {
     fun pauseAudio() {
         // Leaving mid-round: record the round as if it ended now. If the player comes back to it,
         // resumeAudio() cancels this; if the app is closed, it's counted on the next launch.
-        if (state == State.PLAYING && !practice) {
-            val sc = currentScore()
-            val clr = sc >= par
-            savePending(sc, clr, !clr && triesLeft <= 1, sc > levelBest)
-        }
+        if (state == State.PLAYING || (state == State.PRO && stateBeforePro == State.PLAYING)) saveAbandoned()
         pauseRound("Paused: touch to continue")
         sound.stop()
+    }
+
+    /** Record a round the player walked away from as if it ended right now. */
+    private fun saveAbandoned() {
+        if (practice) return
+        val sc = currentScore()
+        val clr = sc >= par
+        savePending(sc, clr, !clr && triesLeft <= 1, sc > levelBest)
     }
 
     /** Freeze a round in progress until the player touches the screen again. */
@@ -424,6 +428,7 @@ class GameView(context: Context) : View(context) {
             // Back is ignored during the short wait, then it exits like the Exit button.
             return System.currentTimeMillis() - proShownAt < proWaitSeconds * 1000L
         }
+        if (state == State.PLAYING) saveAbandoned()     // so Exit from the Pro screen can't skip a strike
         pauseRound("Paused: touch to continue")
         stateBeforePro = state
         proFromMenu = false
@@ -438,8 +443,20 @@ class GameView(context: Context) : View(context) {
         applyTheme()
         resetRect.set(w - dp(96f), dp(14f), w - dp(12f), dp(50f)) // DEBUG
         safeRect.set(w - dp(96f), dp(58f), w - dp(12f), dp(94f))   // DEBUG
-        newRound()
-        restorePending()    // a round that ended (or was abandoned) before the app closed still counts
+        if (oldw == 0 && oldh == 0) {
+            // First layout after launch
+            newRound()
+            restorePending()    // a round that ended (or was abandoned) before the app closed still counts
+            if (triesLeft <= 0 && state != State.RUN_OVER) {
+                // The app was closed on the GAME OVER screen: that game is finished
+                state = State.RUN_OVER
+                newBest = false
+                overAtMs = System.currentTimeMillis()
+            }
+        } else if (state == State.READY) {
+            newRound()          // window resized between rounds: re-lay out the next round
+        }
+        // (A resize mid-round keeps the round going instead of handing out a fresh one.)
     }
 
     /** Pro themes recolor the whole game; without Pro it's always Classic. */
@@ -1408,6 +1425,7 @@ class GameView(context: Context) : View(context) {
                 android.widget.Toast.makeText(context, "Pro is coming soon!", android.widget.Toast.LENGTH_SHORT).show()
             proStayRect.contains(x, y) -> {
                 proFromMenu = false
+                if (stateBeforePro == State.PLAYING) clearPending()   // back to the same round
                 state = stateBeforePro
                 invalidate()
             }
