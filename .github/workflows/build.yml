@@ -7,6 +7,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # true once the Google Play upload key has been added under Settings > Secrets and variables > Actions
+      HAS_UPLOAD_KEY: ${{ secrets.UPLOAD_KEYSTORE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -25,3 +28,24 @@ jobs:
         with:
           name: InnerCircle-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Decode upload key
+        if: env.HAS_UPLOAD_KEY == 'true'
+        run: echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.p12"
+        env:
+          UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+
+      # Always builds the release bundle (so R8 problems show up early); it is signed only when the key exists.
+      - name: Build release bundle for Google Play
+        run: ./gradlew bundleRelease
+        env:
+          UPLOAD_KEYSTORE_PATH: ${{ env.HAS_UPLOAD_KEY == 'true' && format('{0}/upload.p12', runner.temp) || '' }}
+          UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
+          UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+          UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+
+      - uses: actions/upload-artifact@v6
+        if: env.HAS_UPLOAD_KEY == 'true'
+        with:
+          name: InnerCircle-release-aab
+          path: app/build/outputs/bundle/release/app-release.aab

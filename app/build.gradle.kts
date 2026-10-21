@@ -24,6 +24,17 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        // Google Play upload key. It is NOT in the repo: GitHub Actions decodes it from the
+        // UPLOAD_KEYSTORE_* secrets and passes its location and passwords in as environment variables.
+        create("release") {
+            val path = System.getenv("UPLOAD_KEYSTORE_PATH")
+            if (!path.isNullOrBlank()) {
+                storeFile = file(path)
+                storePassword = System.getenv("UPLOAD_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("UPLOAD_KEY_ALIAS")
+                keyPassword = System.getenv("UPLOAD_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -31,7 +42,13 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
-            isMinifyEnabled = false
+            // Shrink and optimize the Play build (R8)
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            if (!System.getenv("UPLOAD_KEYSTORE_PATH").isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
