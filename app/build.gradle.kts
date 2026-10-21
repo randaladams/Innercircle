@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.innercircle"
+    namespace = "com.adamselite.innercircle"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.innercircle"
+        applicationId = "com.adamselite.innercircle"
         minSdk = 24
         targetSdk = 34
         versionCode = 1

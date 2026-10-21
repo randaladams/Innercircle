@@ -1,4 +1,4 @@
-package com.example.innercircle
+package com.adamselite.innercircle
 
 import android.app.Activity
 import android.os.Bundle
