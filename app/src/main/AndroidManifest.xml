@@ -6,6 +6,7 @@
         android:label="Inner Circle"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
+        android:enableOnBackInvokedCallback="true"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
 
         <activity

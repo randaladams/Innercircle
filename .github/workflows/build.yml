@@ -7,6 +7,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Google Play upload key, stored as repository secrets (Settings > Secrets and variables > Actions).
+      # When these are missing, the release build is still compiled (to catch problems) but not signed.
+      UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+      UPLOAD_STORE_PASSWORD: ${{ secrets.UPLOAD_STORE_PASSWORD }}
+      UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+      UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v6
 
@@ -17,12 +24,28 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: "8.9"
+          gradle-version: "9.6.0"
 
-      - name: Build debug APK
-        run: gradle assembleDebug
+      - name: Build debug APK and release build
+        run: |
+          if [ -n "$UPLOAD_KEYSTORE_BASE64" ]; then
+            echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            gradle assembleDebug assembleRelease bundleRelease -PuploadStoreFile="$RUNNER_TEMP/upload.jks"
+          else
+            gradle assembleDebug assembleRelease
+          fi
 
       - uses: actions/upload-artifact@v6
         with:
           name: InnerCircle-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      # Signed release: the .aab is what you upload to Google Play; the .apk lets you test the
+      # exact release build on your phone first.
+      - uses: actions/upload-artifact@v6
+        if: env.UPLOAD_KEYSTORE_BASE64 != ''
+        with:
+          name: InnerCircle-release
+          path: |
+            app/build/outputs/bundle/release/app-release.aab
+            app/build/outputs/apk/release/app-release.apk

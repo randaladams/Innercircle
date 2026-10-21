@@ -88,7 +88,7 @@ class GameView(context: Context) : View(context) {
     private val adBannerHeightDp = 60f
     private val hudHeightDp = 186f            // top area used by the timer, score and progress bar
     private val bottomReserveDp = 100f        // bottom room for the ready-screen text and menu buttons
-    private val showAdPlaceholder = true      // DEBUG: outlines the banner space; set false to hide
+    private val showAdPlaceholder = BuildConfig.DEBUG   // outline the banner space in test builds only
 
     // Sound
     private val humLowHz = 70f                // hum pitch when the ring is full size
@@ -160,8 +160,9 @@ class GameView(context: Context) : View(context) {
     private var paused = false                // after a revive: waits for a touch before resuming
     private var adEndsAt = 0L
     private var pausedMsg = "Touch to continue"
-    // Pro. For now it's switched on by holding RESET (test mode); later Google Play Billing sets it.
-    private var isPro = prefs.getBoolean("pro", false)
+    // Pro. For now it's switched on by holding RESET in test (debug) builds only; release builds
+    // can't turn it on until Google Play Billing is added.
+    private var isPro = BuildConfig.DEBUG && prefs.getBoolean("pro", false)
     private var maxLevel = prefs.getInt("maxLevel", prefs.getInt("level", 1))  // highest level ever reached
     private var resetHeld = false
     private val checkpointRects = Array(4) { RectF() }
@@ -1679,7 +1680,7 @@ class GameView(context: Context) : View(context) {
         canvas.drawText("Missed par, by shape", left, y, cornerText)
         y += dp(24f)
         var any = false
-        for (sh in Shape.values()) {
+        for (sh in Shape.entries) {
             val n = prefs.getInt("st_rounds_${sh.name}", 0)
             if (n == 0) continue
             any = true
@@ -1754,7 +1755,7 @@ class GameView(context: Context) : View(context) {
                     resetRect.contains(e.x, e.y)) {
                     // Tap = reset (with confirmation). Hold = toggle Pro test mode.
                     resetHeld = true
-                    postDelayed(toggleProRunnable, longPressMs)
+                    if (BuildConfig.DEBUG) postDelayed(toggleProRunnable, longPressMs)   // test builds only
                     return true
                 }
                 // DEBUG: safe spot button toggles the overlay without starting the game
