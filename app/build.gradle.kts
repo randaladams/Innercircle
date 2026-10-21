@@ -11,8 +11,8 @@ android {
         applicationId = "com.adamselite.innercircle"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 1          // must go up by at least 1 for every Google Play upload
+        versionName = "1.0.0"
     }
 
     // One fixed debug key, checked into the repo, so every GitHub build is signed the same way.
