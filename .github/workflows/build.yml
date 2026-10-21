@@ -7,6 +7,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Google Play upload key, stored as repository secrets (Settings > Secrets and variables > Actions).
+      # When these are missing, the release build is still compiled (to catch problems) but not signed.
+      UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+      UPLOAD_STORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
+      UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+      UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v6
 
@@ -17,12 +24,45 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: "8.9"
+          gradle-version: "9.6.0"
 
       - name: Build debug APK
-        run: gradle assembleDebug
+        run: |
+          set -o pipefail
+          gradle assembleDebug 2>&1 | tee "$RUNNER_TEMP/build.log"
 
+      # Uploaded before the release step, so a release/signing problem never blocks the test APK.
       - uses: actions/upload-artifact@v6
         with:
           name: InnerCircle-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Build release
+        run: |
+          set -o pipefail
+          if [ -n "$UPLOAD_KEYSTORE_BASE64" ]; then
+            echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            gradle assembleRelease bundleRelease -PuploadStoreFile="$RUNNER_TEMP/upload.jks" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          else
+            gradle assembleRelease 2>&1 | tee "$RUNNER_TEMP/build.log"
+          fi
+
+      # If a build step fails, post the error lines as an annotation on the run, so they can be read
+      # through the GitHub API (and at the top of the run page) without opening the full log.
+      - name: Report build errors
+        if: failure()
+        run: |
+          msg=$(grep -v "^> Task" "$RUNNER_TEMP/build.log" \
+                | grep -E "^e: |What went wrong|error:|Error:|Could not|FAILED|^\* " -A4 \
+                | grep -v "^--$" | head -60 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=Build failed::${msg:-No error lines found; see the full log}"
+
+      # Signed release: the .aab is what you upload to Google Play; the .apk lets you test the
+      # exact release build on your phone first.
+      - uses: actions/upload-artifact@v6
+        if: env.UPLOAD_KEYSTORE_BASE64 != ''
+        with:
+          name: InnerCircle-release
+          path: |
+            app/build/outputs/bundle/release/app-release.aab
+            app/build/outputs/apk/release/app-release.apk
