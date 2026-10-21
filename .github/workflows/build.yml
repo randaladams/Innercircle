@@ -26,17 +26,28 @@ jobs:
         with:
           gradle-version: "9.6.0"
 
-      - name: Build debug APK and release build
+      - name: Build debug APK
+        run: |
+          set -o pipefail
+          gradle assembleDebug 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # Uploaded before the release step, so a release/signing problem never blocks the test APK.
+      - uses: actions/upload-artifact@v6
+        with:
+          name: InnerCircle-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Build release
         run: |
           set -o pipefail
           if [ -n "$UPLOAD_KEYSTORE_BASE64" ]; then
             echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
-            gradle assembleDebug assembleRelease bundleRelease -PuploadStoreFile="$RUNNER_TEMP/upload.jks" 2>&1 | tee "$RUNNER_TEMP/build.log"
+            gradle assembleRelease bundleRelease -PuploadStoreFile="$RUNNER_TEMP/upload.jks" 2>&1 | tee "$RUNNER_TEMP/build.log"
           else
-            gradle assembleDebug assembleRelease 2>&1 | tee "$RUNNER_TEMP/build.log"
+            gradle assembleRelease 2>&1 | tee "$RUNNER_TEMP/build.log"
           fi
 
-      # If the build fails, post the error lines as an annotation on the run, so they can be read
+      # If a build step fails, post the error lines as an annotation on the run, so they can be read
       # through the GitHub API (and at the top of the run page) without opening the full log.
       - name: Report build errors
         if: failure()
@@ -45,11 +56,6 @@ jobs:
                 | grep -E "^e: |What went wrong|error:|Error:|Could not|FAILED|^\* " -A4 \
                 | grep -v "^--$" | head -60 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
           echo "::error title=Build failed::${msg:-No error lines found; see the full log}"
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: InnerCircle-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
 
       # Signed release: the .aab is what you upload to Google Play; the .apk lets you test the
       # exact release build on your phone first.
