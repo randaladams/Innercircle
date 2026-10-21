@@ -1,16 +1,15 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "com.adamselite.innercircle"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.adamselite.innercircle"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 36           // Google Play requires API 36 for new apps from Aug 31, 2026
         versionCode = 1          // must go up by at least 1 for every Google Play upload
         versionName = "1.0.0"
     }
@@ -40,7 +39,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
