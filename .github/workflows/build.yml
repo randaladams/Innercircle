@@ -41,7 +41,8 @@ jobs:
       - name: Report build errors
         if: failure()
         run: |
-          msg=$(grep -E "^e: |^w: .*error|What went wrong|^> |error:|Could not|FAILURE" -A3 "$RUNNER_TEMP/build.log" \
+          msg=$(grep -v "^> Task" "$RUNNER_TEMP/build.log" \
+                | grep -E "^e: |What went wrong|error:|Error:|Could not|FAILED|^\* " -A4 \
                 | grep -v "^--$" | head -60 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
           echo "::error title=Build failed::${msg:-No error lines found; see the full log}"
 
