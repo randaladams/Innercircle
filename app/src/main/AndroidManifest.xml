@@ -9,6 +9,11 @@
         android:enableOnBackInvokedCallback="true"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
 
+        <!-- AdMob app ID (see res/values/ads.xml) -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="@string/admob_app_id" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

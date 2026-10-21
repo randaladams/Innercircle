@@ -22,7 +22,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug
+        shell: bash
+        run: ./gradlew assembleDebug 2>&1 | tee -a build.log; exit ${PIPESTATUS[0]}
 
       - uses: actions/upload-artifact@v6
         with:
@@ -37,7 +38,8 @@ jobs:
 
       # Always builds the release bundle (so R8 problems show up early); it is signed only when the key exists.
       - name: Build release bundle for Google Play
-        run: ./gradlew bundleRelease
+        shell: bash
+        run: ./gradlew bundleRelease 2>&1 | tee -a build.log; exit ${PIPESTATUS[0]}
         env:
           UPLOAD_KEYSTORE_PATH: ${{ env.HAS_UPLOAD_KEY == 'true' && format('{0}/upload.p12', runner.temp) || '' }}
           UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
@@ -49,3 +51,12 @@ jobs:
         with:
           name: InnerCircle-release-aab
           path: app/build/outputs/bundle/release/app-release.aab
+
+      # If the build fails, surface the compiler/Gradle errors as annotations on the run
+      - name: Report build errors
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^e: |error:|What went wrong|> |Could not" build.log | head -40 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done

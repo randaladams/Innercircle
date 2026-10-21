@@ -63,3 +63,9 @@ kotlin {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
+
+dependencies {
+    implementation("com.google.android.gms:play-services-ads:25.5.0")        // AdMob
+    implementation("com.google.android.ump:user-messaging-platform:3.1.0")   // ad consent (EU/UK)
+    implementation("com.android.billingclient:billing:9.1.0")                // Google Play Billing
+}

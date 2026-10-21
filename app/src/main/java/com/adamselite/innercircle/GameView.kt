@@ -88,7 +88,7 @@ class GameView(context: Context) : View(context) {
     private val adBannerHeightDp = 60f
     private val hudHeightDp = 186f            // top area used by the timer, score and progress bar
     private val bottomReserveDp = 100f        // bottom room for the ready-screen text and menu buttons
-    private val showAdPlaceholder = true      // DEBUG: outlines the banner space; set false to hide
+    private val showAdPlaceholder = false     // DEBUG: outlines the banner space (the real AdMob banner sits there now)
 
     // Sound
     private val humLowHz = 70f                // hum pitch when the ring is full size
@@ -168,11 +168,34 @@ class GameView(context: Context) : View(context) {
     private var checkpointLevels = emptyList<Int>()
     private val toggleProRunnable = Runnable {
         resetHeld = false
-        isPro = !isPro
-        prefs.edit().putBoolean("pro", isPro).apply()
-        applyTheme()
+        setProOwned(!isPro)
         android.widget.Toast.makeText(context, if (isPro) "Pro test mode ON" else "Pro test mode OFF",
             android.widget.Toast.LENGTH_SHORT).show()
+    }
+    // Holding RESET to toggle Pro only works in debug (test) builds, never in the Play release.
+    private val isDebuggable =
+        (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    // ---- Hooks set by MainActivity (ads, billing and privacy live outside the game view) ----
+    /** Shows a rewarded video ad and calls the given function if the player earned the reward. */
+    var rewardedAdHandler: ((onRewarded: () -> Unit) -> Unit)? = null
+    var onUpgradeClicked: (() -> Unit)? = null
+    var onProChanged: ((Boolean) -> Unit)? = null
+    var onPrivacyClicked: (() -> Unit)? = null
+    /** True for players (e.g. in the EU) who must be able to reopen their ad-privacy choices. */
+    var privacyOptionsRequired = false
+        set(value) { field = value; invalidate() }
+    private val privacyRect = RectF()
+
+    val proActive: Boolean get() = isPro
+
+    /** Turns Pro on or off (from Google Play Billing, or the debug test switch). */
+    fun setProOwned(owned: Boolean) {
+        if (isPro == owned) return
+        isPro = owned
+        prefs.edit().putBoolean("pro", isPro).apply()
+        applyTheme()
+        onProChanged?.invoke(isPro)
         invalidate()
     }
     private var stateBeforePro = State.READY
@@ -899,6 +922,12 @@ class GameView(context: Context) : View(context) {
 
     /** Placeholder for a real rewarded ad. */
     private fun startAd() {
+        val showAd = rewardedAdHandler
+        if (showAd != null) {
+            showAd { revive() }     // real AdMob rewarded video; revive once it's watched
+            return
+        }
+        // No ad system available: fall back to the placeholder ad screen
         state = State.AD
         adEndsAt = System.currentTimeMillis() + fakeAdSeconds * 1000L
         invalidate()
@@ -1119,6 +1148,10 @@ class GameView(context: Context) : View(context) {
             canvas.drawText("★ PRO", resetRect.left - dp(26f), resetRect.centerY() + dp(4f), tinyText)
         }
         if (state == State.READY) drawMenu(canvas)
+        if (privacyOptionsRequired && state == State.READY) {
+            privacyRect.set(width - dp(96f), dp(58f), width - dp(12f), dp(84f))
+            drawSmallButton(canvas, privacyRect, "PRIVACY", Color.argb(160, 60, 70, 100))
+        }
         if (safeButtonEnabled && state == State.READY) drawSafeButton(canvas)     // DEBUG
         if (showAdPlaceholder && !isPro && !isFullScreen()) drawAdPlaceholder(canvas)    // DEBUG
     }
@@ -1420,9 +1453,11 @@ class GameView(context: Context) : View(context) {
 
     private fun handleProTouch(x: Float, y: Float) {
         when {
-            proUpgradeRect.contains(x, y) ->
-                // Placeholder until Google Play Billing is added
-                android.widget.Toast.makeText(context, "Pro is coming soon!", android.widget.Toast.LENGTH_SHORT).show()
+            proUpgradeRect.contains(x, y) -> {
+                val buy = onUpgradeClicked
+                if (buy != null) buy()      // Google Play purchase screen
+                else android.widget.Toast.makeText(context, "Pro is coming soon!", android.widget.Toast.LENGTH_SHORT).show()
+            }
             proStayRect.contains(x, y) -> {
                 proFromMenu = false
                 if (stateBeforePro == State.PLAYING) clearPending()   // back to the same round
@@ -1752,9 +1787,18 @@ class GameView(context: Context) : View(context) {
                 // DEBUG: reset button, only when not mid-game
                 if (state != State.PLAYING && !isFullScreen() &&
                     resetRect.contains(e.x, e.y)) {
-                    // Tap = reset (with confirmation). Hold = toggle Pro test mode.
-                    resetHeld = true
-                    postDelayed(toggleProRunnable, longPressMs)
+                    // Tap = reset (with confirmation). Hold = toggle Pro test mode (debug builds only).
+                    if (isDebuggable) {
+                        resetHeld = true
+                        postDelayed(toggleProRunnable, longPressMs)
+                    } else {
+                        confirmReset()
+                    }
+                    return true
+                }
+                // Ad privacy choices (shown only where the law requires it)
+                if (privacyOptionsRequired && state == State.READY && privacyRect.contains(e.x, e.y)) {
+                    onPrivacyClicked?.invoke()
                     return true
                 }
                 // DEBUG: safe spot button toggles the overlay without starting the game

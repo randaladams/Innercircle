@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        These are Google's official TEST IDs: they always show test ads and are safe to use while developing.
+        Before publishing, replace all three with your own IDs from https://admob.google.com
+        (Apps > Inner Circle > App settings for the App ID; Ad units for the banner and rewarded IDs).
+    -->
+    <string name="admob_app_id" translatable="false">ca-app-pub-3940256099942544~3347511713</string>
+    <string name="admob_banner_unit_id" translatable="false">ca-app-pub-3940256099942544/6300978111</string>
+    <string name="admob_rewarded_unit_id" translatable="false">ca-app-pub-3940256099942544/5224354917</string>
+</resources>
