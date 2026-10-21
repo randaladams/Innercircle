@@ -28,12 +28,22 @@ jobs:
 
       - name: Build debug APK and release build
         run: |
+          set -o pipefail
           if [ -n "$UPLOAD_KEYSTORE_BASE64" ]; then
             echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
-            gradle assembleDebug assembleRelease bundleRelease -PuploadStoreFile="$RUNNER_TEMP/upload.jks"
+            gradle assembleDebug assembleRelease bundleRelease -PuploadStoreFile="$RUNNER_TEMP/upload.jks" 2>&1 | tee "$RUNNER_TEMP/build.log"
           else
-            gradle assembleDebug assembleRelease
+            gradle assembleDebug assembleRelease 2>&1 | tee "$RUNNER_TEMP/build.log"
           fi
+
+      # If the build fails, post the error lines as an annotation on the run, so they can be read
+      # through the GitHub API (and at the top of the run page) without opening the full log.
+      - name: Report build errors
+        if: failure()
+        run: |
+          msg=$(grep -E "^e: |^w: .*error|What went wrong|^> |error:|Could not|FAILURE" -A3 "$RUNNER_TEMP/build.log" \
+                | grep -v "^--$" | head -60 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=Build failed::${msg:-No error lines found; see the full log}"
 
       - uses: actions/upload-artifact@v6
         with:
