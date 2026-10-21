@@ -11,7 +11,7 @@ jobs:
       # Google Play upload key, stored as repository secrets (Settings > Secrets and variables > Actions).
       # When these are missing, the release build is still compiled (to catch problems) but not signed.
       UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
-      UPLOAD_STORE_PASSWORD: ${{ secrets.UPLOAD_STORE_PASSWORD }}
+      UPLOAD_STORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
       UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
       UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
     steps:
